@@ -124,6 +124,7 @@ demo/                   实机截图（ashen / ember / 塔展示 / 怪展示）
 - **关卡存档**：自动保存到 `user://savegame.json`（macOS 上是 `~/Library/Application Support/Godot/app_userdata/Cinderwatch · Godot/savegame.json`）。保存内容：关卡、生态区、波次、金币、生命、击杀数、已建塔（位置 + 类型 + 等级）。触发时机：每波清空后、建塔 / 升级 / 卖塔后、手动 `F5`、退出时。
 - **读档**：启动自动读取存档并恢复塔（直接按等级重建，无建造动画）。想重新开局加 `--fresh`；`--level=N` 指定关卡。
 - **退出**：底部栏新增 `Save [F5]` 与 `Exit [Esc]`；`Esc` 打开确认面板（Keep playing / Save & Exit / Exit），`Esc` 再按一次关闭面板。
+- **失败重试**：生命耗尽后不再回到关卡 1，而是**原地重开当前关卡 + 当前生态区**（金币/生命按开局值重置，塔清空），同时把存档写成“重打本关”状态，防止退出后再进来看到崩盘残局。
 - **重头来过**：底部栏 `Restart [R]`（或按 `R`）弹出确认，确认后删除存档、回到关卡 1 / 第 0 波、金币重置为 `START_GOLD`。
 - 音频菜单保持可用，音量与静音状态另存于 `user://cinderwatch.cfg`。
 

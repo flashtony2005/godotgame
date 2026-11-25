@@ -55,6 +55,7 @@ var _args_fresh := false
 var _demo_t := -1.0
 var _demo_kind := ""
 var _zap_test := -1.0
+var _defeat_test := -1.0
 
 var lives := MAX_LIVES
 var gold := START_GOLD
@@ -141,6 +142,31 @@ func _save_config() -> void:
 	cfg.set_value("audio", "muted", audio.muted if audio != null else false)
 	cfg.set_value("audio", "master_volume", audio.master_volume if audio != null else 1.0)
 	cfg.save(CFG_PATH)
+
+
+func _write_save(data: Dictionary) -> void:
+	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if f == null:
+		return
+	f.store_string(JSON.stringify(data))
+	f.close()
+
+
+func _save_retry_state() -> void:
+	## 失败时写入“重打本关”的存档，避免退出后再进来看到已经崩盘的残局
+	_write_save({
+		"version": 1,
+		"stamp": Time.get_datetime_string_from_system(false, true),
+		"level": level_num,
+		"biome": biome_idx,
+		"wave": 0,
+		"gold": START_GOLD,
+		"lives": MAX_LIVES,
+		"slain": 0,
+		"best_wave": best_wave,
+		"towers": [],
+	})
+	print("[save] retry state stage=", level_num, " biome=", biome_idx)
 
 
 func _save_game(quiet: bool = false) -> void:
@@ -267,6 +293,8 @@ func _parse_cli_args() -> void:
 		elif a == "--demo=restart":
 			_demo_t = 2.2
 			_demo_kind = "restart"
+		elif a == "--defeat-test":
+			_defeat_test = 2.0
 		elif a == "--zap-test":
 			_zap_test = 1.5
 		elif a == "--demo=restart-run":
@@ -450,6 +478,8 @@ func _start_level(p_level: int, p_biome: int, p_seed: int, instant_appear: bool)
 	_clear_entities()
 	level_num = p_level
 	biome_idx = posmod(p_biome, world.get_biome_count())
+	if OS.get_cmdline_user_args().has("--log"):
+		print("[level] stage=", level_num, " biome=", biome_idx)
 	world.build_level(level_num, biome_idx, p_seed)
 	world.apply_biome_look(0.0, true, world_env, fx, mist_mat, weather, post, fade_v)
 
@@ -551,7 +581,7 @@ func _update_transitions(dt: float) -> void:
 				for fh in tw.flame_handles:
 					fh["power"] = beacon_power
 		if state_t >= 2.6:
-			_begin_crumble(0, true)
+			_begin_crumble(biome_idx, true)
 	elif state == "crumble":
 		var dur := 2.4
 		for pc in world.pieces:
@@ -575,7 +605,7 @@ func _update_transitions(dt: float) -> void:
 		for ef in env_flames:
 			ef["power"] = maxf(0.0, 1.0 - state_t * 1.6)
 		if state_t >= dur:
-			var next_lvl := 1 if _is_defeat_reset else level_num + 1
+			var next_lvl := level_num if _is_defeat_reset else level_num + 1
 			_start_level(next_lvl, next_biome_idx, -1, false)
 	elif state == "rise":
 		var dur := 1.95
@@ -628,6 +658,15 @@ func _update_transitions(dt: float) -> void:
 # ============================================================================
 
 func _process(delta: float) -> void:
+	if _defeat_test > 0.0:
+		_defeat_test -= delta
+		if _defeat_test <= 0.0:
+			lives = 0
+			state = "defeat"
+			state_t = 0.0
+			hud.show_banner("THE BEACON HAS FALLEN", "Survived to Wave %d  •  Retrying Stage %d" % [wave, level_num], Color(1.0, 0.30, 0.22), 3.0)
+			_save_retry_state()
+
 	if _zap_test > 0.0:
 		_zap_test -= delta
 		if _zap_test <= 0.0:
@@ -1522,7 +1561,8 @@ func _step_monsters(dt: float) -> void:
 				if lives <= 0 and state == "play":
 					state = "defeat"
 					state_t = 0.0
-					hud.show_banner("THE BEACON HAS FALLEN", "Survived to Wave %d  •  Rebuilding the Watch..." % wave, Color(1.0, 0.30, 0.22), 3.0)
+					hud.show_banner("THE BEACON HAS FALLEN", "Survived to Wave %d  •  Retrying Stage %d" % [wave, level_num], Color(1.0, 0.30, 0.22), 3.0)
+					_save_retry_state()
 					audio.play_sfx("beaconOut", 0.0, 1.0)
 				i -= 1
 				continue
