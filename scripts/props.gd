@@ -513,7 +513,7 @@ static func build_cave(pal: Dictionary, rng: U.Rng, frost: bool = false) -> Soup
 
 	# Warning skulls on wooden pikes flanking the cave entrance
 	for side in [-1.0, 1.0]:
-		var px := side * 2.15
+		var px: float = side * 2.15
 		var pz := 1.05
 		sp.cyl(0.055, 1.55, px, 0.75, pz, C["woodD"], {"n": 5, "l": TX.L_WOOD, "r": Vector3(0.08, 0, -side * 0.12)})
 		add_skull(sp, px + side * 0.08, 1.55, pz + 0.06, 1.15, -side * 0.35)

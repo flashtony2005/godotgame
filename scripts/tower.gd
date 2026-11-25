@@ -51,7 +51,7 @@ func setup(p_pad_idx: int, p_kind: String, p_pos: Vector3, p_seed: int, fx_node:
 	level = 0
 	position = p_pos
 	_rng = U.make_rng(p_seed)
-	stats = Defs.TOWERS[kind][level]
+	stats = Defs.tw(kind, level)
 	total_cost = int(stats["cost"])
 	_start_construction(fx_node, audio_node)
 
@@ -60,7 +60,7 @@ func upgrade(fx_node: Node, audio_node: Node) -> bool:
 	if level >= 2 or building:
 		return false
 	level += 1
-	stats = Defs.TOWERS[kind][level]
+	stats = Defs.tw(kind, level)
 	total_cost += int(stats["cost"])
 	_clear_flames(fx_node)
 	_start_construction(fx_node, audio_node)
@@ -74,7 +74,7 @@ func get_sell_value() -> int:
 func get_next_stats() -> Dictionary:
 	if level >= 2:
 		return {}
-	return Defs.TOWERS[kind][level + 1]
+	return Defs.tw(kind, level + 1)
 
 
 func clear_visuals(fx_node: Node) -> void:

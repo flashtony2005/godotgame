@@ -631,7 +631,7 @@ func _pick_biome_mob(w: int) -> String:
 
 
 func _spawn_monster(kind: String, lane: float, dist_along: float = 0.0) -> Dictionary:
-	var d: Dictionary = Defs.MONSTERS.get(kind, Defs.MONSTERS["skeleton"])
+	var d: Dictionary = Defs.MONSTERS.get(kind, Defs.MONSTERS["skel"])
 	var is_boss := bool(d.get("boss", false))
 	var hp_scale := pow(1.13, float(maxi(0, wave - 1))) * (1.0 + float(level_num - 1) * 0.18)
 	var max_hp := float(d["hp"]) * hp_scale
@@ -738,12 +738,12 @@ func _step_ai_commander(dt: float) -> void:
 					best_k = k
 			want_kind = best_k
 
-		var cost := int(Defs.TOWERS[want_kind][0]["cost"])
+		var cost := int(Defs.tw(want_kind)["cost"])
 		if gold >= cost:
 			# Score free pads by road coverage
 			var best_pi := free_pads[0]
 			var best_sc := -1e9
-			var rng_r := float(Defs.TOWERS[want_kind][0]["range"])
+			var rng_r := float(Defs.tw(want_kind)["range"])
 			for pi in free_pads:
 				var pd: Dictionary = world.pads[pi]
 				var px := float(pd["x"])
@@ -786,7 +786,7 @@ func _build_tower(pad_idx: int, kind: String) -> bool:
 	var pd: Dictionary = world.pads[pad_idx]
 	if bool(pd["occupied"]):
 		return false
-	var cost := int(Defs.TOWERS[kind][0]["cost"])
+	var cost := int(Defs.tw(kind)["cost"])
 	if gold < cost:
 		audio.play_sfx("uiDeny")
 		return false
@@ -863,7 +863,7 @@ func _sell_tower(pad_idx: int) -> void:
 
 func _sync_guard_footmen(tw: Node3D) -> void:
 	var st: Dictionary = tw.stats
-	var want := int(st["count"])
+	var want := int(st.get("count", st.get("n", 0)))
 	var max_hp := float(st["hp"])
 	var dmg := float(st["dmg"])
 	var tp := tw.global_position
@@ -1068,7 +1068,7 @@ func _step_projectiles(dt: float) -> void:
 				audio.play_sfx("arrowHit", 0.0, 0.45)
 			else:
 				# Stick smoldering missed arrow into the ground!
-				var gy := world.height_at(pos.x, pos.z)
+				var gy: float = world.height_at(pos.x, pos.z)
 				var dir: Vector3 = (pos - a["prev"]).normalized()
 				if stuck_arrows.size() >= 36:
 					stuck_arrows.pop_front()
@@ -1836,7 +1836,7 @@ func _on_hover_build(pad_idx: int, kind: String) -> void:
 		return
 	hover_build_kind = kind
 	var pd: Dictionary = world.pads[pad_idx]
-	var st: Dictionary = Defs.TOWERS[kind][0]
+	var st: Dictionary = Defs.tw(kind)
 	range_fx.show_range(kind, float(st["range"]), float(st.get("minR", 0.0)), Vector3(float(pd["x"]), 0.0, float(pd["z"])), 0.95)
 
 

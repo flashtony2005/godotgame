@@ -242,7 +242,7 @@ func _generate_layout(rng: U.Rng) -> void:
 		var t_dir := (Vector2(path_pts[i + 1].x, path_pts[i + 1].z) - Vector2(path_pts[i - 1].x, path_pts[i - 1].z)).normalized()
 		var n_dir := Vector2(-t_dir.y, t_dir.x)
 		for side in [-1.0, 1.0]:
-			var cand := p + n_dir * side * rng.frange(2.75, 3.65)
+			var cand: Vector2 = p + n_dir * side * rng.frange(2.75, 3.65)
 			if absf(cand.x) > MAP_HALF - 2.6 or absf(cand.y) > MAP_HALF - 2.6:
 				continue
 			pad_candidates.append(cand)

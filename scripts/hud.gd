@@ -321,7 +321,7 @@ func _build_context_menus() -> void:
 	var key_nums := ["1", "2", "3", "4"]
 	for i in Defs.TOWER_KINDS.size():
 		var k: String = Defs.TOWER_KINDS[i]
-		var st: Dictionary = Defs.TOWERS[k][0]
+		var st: Dictionary = Defs.tw(k)
 		var btn := Button.new()
 		btn.custom_minimum_size = Vector2(142, 46)
 		btn.text = "[%s] %s  %dg\n%s" % [key_nums[i], String(st["name"]), int(st["cost"]), String(st["desc"])]
@@ -567,7 +567,7 @@ func refresh_menu_gold(gold: int, tower_node: Node = null) -> void:
 	if _menu_mode == "build":
 		for k in _build_btns:
 			var btn: Button = _build_btns[k]
-			var cost := int(Defs.TOWERS[k][0]["cost"])
+			var cost := int(Defs.tw(k)["cost"])
 			btn.disabled = gold < cost
 	elif _menu_mode == "inspect" and tower_node != null:
 		_refresh_inspect(tower_node, gold)
@@ -579,7 +579,7 @@ func _refresh_inspect(tw: Node, gold: int) -> void:
 	var stars := "★".repeat(lvl + 1) + "☆".repeat(2 - lvl)
 	_insp_title.text = "%s  %s" % [String(st["name"]), stars]
 	if String(tw.kind) == "guard":
-		_insp_stats.text = "Footmen: %d  |  HP: %d  |  DMG: %d  |  Range: %.1f" % [int(st["count"]), int(st["hp"]), int(st["dmg"]), float(st["range"])]
+		_insp_stats.text = "Footmen: %d  |  HP: %d  |  DMG: %d  |  Range: %.1f" % [int(st.get("count", st.get("n", 0))), int(st["hp"]), int(st["dmg"]), float(st["range"])]
 	else:
 		_insp_stats.text = "DMG: %d  |  Rate: %.1f/s  |  Range: %.1f" % [int(st["dmg"]), float(st["rate"]), float(st["range"])]
 
@@ -590,7 +590,7 @@ func _refresh_inspect(tw: Node, gold: int) -> void:
 		_insp_upg.disabled = true
 	else:
 		if String(tw.kind) == "guard":
-			_insp_next.text = "Next: %d Footmen, %d HP, %d DMG" % [int(nxt["count"]), int(nxt["hp"]), int(nxt["dmg"])]
+			_insp_next.text = "Next: %d Footmen, %d HP, %d DMG" % [int(nxt.get("count", nxt.get("n", 0))), int(nxt["hp"]), int(nxt["dmg"])]
 		else:
 			_insp_next.text = "Next: %d DMG, %.1f/s, %.1f Range" % [int(nxt["dmg"]), float(nxt["rate"]), float(nxt["range"])]
 		var cost := int(nxt["cost"])

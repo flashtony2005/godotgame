@@ -1,4 +1,5 @@
 extends Node
+const U = preload("res://scripts/util.gd")
 ## Complete procedural dark-fantasy audio synthesizer (ported from 80-audio.js).
 ## Generates 16-bit PCM AudioStreamWAV clips at startup for all 31 combat/UI/transition SFX,
 ## plus seamless looping wind, campfire roar, boss tension drone, generative dark-fantasy chords,

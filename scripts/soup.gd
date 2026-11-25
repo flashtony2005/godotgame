@@ -310,8 +310,8 @@ func add_src(src: Dictionary, o: Dictionary) -> void:
 	var sway: float = float(o.get("sway", 0.0))
 	var emis: float = float(o.get("emis", 0.0))
 	var uvs: float = float(o.get("uvs", 0.25))
-	var uo := floor(_rng.next_f() * 64.0) / 16.0
-	var vo := floor(_rng.next_f() * 64.0) / 16.0
+	var uo: float = floor(_rng.next_f() * 64.0) / 16.0
+	var vo: float = floor(_rng.next_f() * 64.0) / 16.0
 	var smooth_n: bool = o.get("smooth", false)
 	var has_deform: bool = o.has("deform")
 	var deform_fn: Callable = o.get("deform", Callable())
@@ -387,7 +387,7 @@ func _double_from(start: int) -> void:
 	var i := start
 	while i + 2 < end:
 		for j in [0, 2, 1]:
-			var k := i + j
+			var k: int = int(i) + int(j)
 			P.append(P[k])
 			N.append(-N[k])
 			K.append(K[k])

@@ -97,6 +97,22 @@ const ROSTER: Dictionary = {
 }
 
 
+static func tw(kind: String, lvl: int = 0) -> Dictionary:
+	## 把 TOWERS[kind] 的数组字段按等级展开成单值字典（兼容旧 API）
+	var src: Dictionary = TOWERS[kind]
+	var out: Dictionary = {}
+	for key in src.keys():
+		var v: Variant = src[key]
+		if v is Array:
+			var arr: Array = v
+			out[key] = arr[clampi(lvl, 0, arr.size() - 1)]
+		else:
+			out[key] = v
+	if out.has("min_range"):
+		out["minR"] = out["min_range"]
+	return out
+
+
 static func get_biomes() -> Array[Dictionary]:
 	return [
 		{
