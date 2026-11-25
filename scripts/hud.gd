@@ -9,6 +9,7 @@ extends CanvasLayer
 ## - 3D-projected health bars + Boss nameplates + 2D flying gold coins + First-seen monster tips + Title card & banners
 
 const Defs = preload("res://scripts/defs.gd")
+const PX = preload("res://scripts/pixelicons.gd")
 
 signal cmd_toggle_ai()
 signal cmd_call_wave()
@@ -24,6 +25,8 @@ signal cmd_hover_build(pad_idx: int, kind: String)
 signal cmd_upgrade(pad_idx: int)
 signal cmd_sell(pad_idx: int)
 signal cmd_close_menu()
+signal cmd_save()
+signal cmd_quit(save_first: bool)
 
 # Custom 2D canvas overlay for health bars, flying coins, title card, banners, tips
 var overlay: Control
@@ -37,6 +40,7 @@ var build_panel: PanelContainer
 var inspect_panel: PanelContainer
 var audio_backdrop: ColorRect
 var audio_overlay: PanelContainer
+var quit_panel: PanelContainer
 
 # Dynamic labels & buttons
 var lbl_lives: Label
@@ -133,6 +137,32 @@ func _style_button(btn: Button) -> void:
 	btn.add_theme_color_override("font_hover_color", Color(1.0, 0.96, 0.85))
 	btn.add_theme_color_override("font_disabled_color", Color(0.45, 0.43, 0.40))
 	btn.add_theme_font_size_override("font_size", 13)
+	btn.focus_mode = Control.FOCUS_NONE
+
+
+func _style_card(btn: Button, accent: Color) -> void:
+	var base := Color(0.052, 0.058, 0.082, 0.96)
+	var edge := Color(0.34, 0.28, 0.16, 1.0)
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = base
+	sb.border_color = edge
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(3)
+	btn.add_theme_stylebox_override("normal", sb)
+
+	var hov := sb.duplicate() as StyleBoxFlat
+	hov.bg_color = Color(0.10, 0.115, 0.155, 0.98)
+	hov.border_color = accent
+	hov.set_border_width_all(2)
+	btn.add_theme_stylebox_override("hover", hov)
+	btn.add_theme_stylebox_override("focus", hov)
+
+	var act := sb.duplicate() as StyleBoxFlat
+	act.bg_color = Color(0.16, 0.15, 0.12, 0.98)
+	act.border_color = Color(1.0, 0.84, 0.46, 1.0)
+	act.set_border_width_all(2)
+	btn.add_theme_stylebox_override("pressed", act)
+	btn.add_theme_stylebox_override("disabled", sb)
 	btn.focus_mode = Control.FOCUS_NONE
 
 
@@ -234,8 +264,8 @@ func _build_bottom_bar() -> void:
 	bottom_bar.anchor_right = 0.5
 	bottom_bar.anchor_top = 1.0
 	bottom_bar.anchor_bottom = 1.0
-	bottom_bar.offset_left = -280
-	bottom_bar.offset_right = 280
+	bottom_bar.offset_left = -380
+	bottom_bar.offset_right = 380
 	bottom_bar.offset_top = -56
 	bottom_bar.offset_bottom = -12
 	add_child(bottom_bar)
@@ -296,6 +326,18 @@ func _build_bottom_bar() -> void:
 	btn_follow.pressed.connect(func() -> void: cmd_follow_cam.emit())
 	hb.add_child(btn_follow)
 
+	var b_save := Button.new()
+	b_save.text = "Save [F5]"
+	_style_button(b_save)
+	b_save.pressed.connect(func() -> void: cmd_save.emit())
+	hb.add_child(b_save)
+
+	var b_quit := Button.new()
+	b_quit.text = "Exit [Esc]"
+	_style_button(b_quit)
+	b_quit.pressed.connect(func() -> void: open_quit_panel())
+	hb.add_child(b_quit)
+
 
 func _build_context_menus() -> void:
 	# Build Menu (4 towers)
@@ -322,20 +364,69 @@ func _build_context_menus() -> void:
 	for i in Defs.TOWER_KINDS.size():
 		var k: String = Defs.TOWER_KINDS[i]
 		var st: Dictionary = Defs.tw(k)
-		var btn := Button.new()
-		btn.custom_minimum_size = Vector2(142, 46)
-		btn.text = "[%s] %s  %dg\n%s" % [key_nums[i], String(st["name"]), int(st["cost"]), String(st["desc"])]
-		_style_button(btn)
-		btn.pressed.connect(func() -> void:
+		var card := Button.new()
+		card.custom_minimum_size = Vector2(186, 116)
+		_style_card(card, Color(st.get("accent", Color(1.0, 0.8, 0.5))))
+		var cc := VBoxContainer.new()
+		cc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cc.set_anchors_preset(Control.PRESET_FULL_RECT)
+		cc.offset_left = 8.0
+		cc.offset_top = 5.0
+		cc.offset_right = -8.0
+		cc.offset_bottom = -5.0
+		cc.add_theme_constant_override("separation", 1)
+		card.add_child(cc)
+
+		var ic := TextureRect.new()
+		ic.texture = PX.make_texture(k)
+		ic.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ic.custom_minimum_size = Vector2(0, 44)
+		ic.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cc.add_child(ic)
+
+		var nm := _mk_stat_lbl("[%s] %s" % [key_nums[i], String(st["name"])], Color(0.96, 0.92, 0.80))
+		nm.add_theme_font_size_override("font_size", 12)
+		nm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		nm.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cc.add_child(nm)
+
+		var crow := HBoxContainer.new()
+		crow.alignment = BoxContainer.ALIGNMENT_CENTER
+		crow.add_theme_constant_override("separation", 3)
+		crow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var coin := TextureRect.new()
+		coin.texture = PX.make_texture("coin")
+		coin.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		coin.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		coin.custom_minimum_size = Vector2(12, 12)
+		coin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		crow.add_child(coin)
+		var cl := _mk_stat_lbl("%d" % int(st["cost"]), Color(1.0, 0.82, 0.42))
+		cl.add_theme_font_size_override("font_size", 12)
+		cl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		crow.add_child(cl)
+		cc.add_child(crow)
+
+		var dsc := _mk_stat_lbl(String(st["desc"]), Color(0.60, 0.60, 0.58))
+		dsc.add_theme_font_size_override("font_size", 9)
+		dsc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		dsc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		dsc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cc.add_child(dsc)
+
+		card.pressed.connect(func() -> void:
 			if _menu_pad >= 0:
 				cmd_build.emit(_menu_pad, k)
 		)
-		btn.mouse_entered.connect(func() -> void:
+		card.mouse_entered.connect(func() -> void:
 			if _menu_pad >= 0:
 				cmd_hover_build.emit(_menu_pad, k)
 		)
-		grid.add_child(btn)
-		_build_btns[k] = btn
+		grid.add_child(card)
+		_build_btns[k] = card
 
 	# Inspect Menu (Upgrade + 2-Step Sell)
 	inspect_panel = PanelContainer.new()
@@ -386,6 +477,62 @@ func _build_context_menus() -> void:
 	)
 	ihb.add_child(_insp_sell)
 
+
+	# Quit / Exit confirmation panel
+	quit_panel = PanelContainer.new()
+	quit_panel.add_theme_stylebox_override("panel", _style_plate)
+	quit_panel.visible = false
+	quit_panel.anchor_left = 0.5
+	quit_panel.anchor_right = 0.5
+	quit_panel.anchor_top = 0.5
+	quit_panel.anchor_bottom = 0.5
+	quit_panel.offset_left = -168
+	quit_panel.offset_right = 168
+	quit_panel.offset_top = -58
+	quit_panel.offset_bottom = 58
+	add_child(quit_panel)
+
+	var qvb := VBoxContainer.new()
+	qvb.add_theme_constant_override("separation", 8)
+	quit_panel.add_child(qvb)
+
+	var qh := _mk_stat_lbl("LEAVE THE WATCH?", Color(0.95, 0.78, 0.42))
+	qh.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	qvb.add_child(qh)
+
+	var qsub := _mk_stat_lbl("Progress is saved automatically each wave.", Color(0.62, 0.62, 0.60))
+	qsub.add_theme_font_size_override("font_size", 11)
+	qsub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	qvb.add_child(qsub)
+
+	var qrow := HBoxContainer.new()
+	qrow.alignment = BoxContainer.ALIGNMENT_CENTER
+	qrow.add_theme_constant_override("separation", 8)
+	qvb.add_child(qrow)
+
+	var q_back := Button.new()
+	q_back.text = "Keep playing"
+	_style_button(q_back)
+	q_back.pressed.connect(close_quit_panel)
+	qrow.add_child(q_back)
+
+	var q_save := Button.new()
+	q_save.text = "Save & Exit"
+	_style_button(q_save)
+	q_save.pressed.connect(func() -> void:
+		close_quit_panel()
+		cmd_quit.emit(true)
+	)
+	qrow.add_child(q_save)
+
+	var q_exit := Button.new()
+	q_exit.text = "Exit"
+	_style_button(q_exit)
+	q_exit.pressed.connect(func() -> void:
+		close_quit_panel()
+		cmd_quit.emit(false)
+	)
+	qrow.add_child(q_exit)
 
 func _build_audio_overlay() -> void:
 	audio_backdrop = ColorRect.new()
@@ -493,7 +640,7 @@ func dismiss_title() -> void:
 func is_pointer_over_ui(pos: Vector2) -> bool:
 	if audio_backdrop != null and audio_backdrop.visible:
 		return true
-	for p in [top_left, top_center, top_right, bottom_bar, build_panel, inspect_panel]:
+	for p in [top_left, top_center, top_right, bottom_bar, build_panel, inspect_panel, quit_panel]:
 		if p != null and p.visible and p.get_global_rect().has_point(pos):
 			return true
 	return false
@@ -501,6 +648,23 @@ func is_pointer_over_ui(pos: Vector2) -> bool:
 
 func is_audio_overlay_open() -> bool:
 	return audio_backdrop != null and audio_backdrop.visible
+
+
+func open_quit_panel() -> void:
+	close_menus()
+	quit_panel.visible = true
+
+
+func close_quit_panel() -> void:
+	quit_panel.visible = false
+
+
+func is_quit_panel_open() -> bool:
+	return quit_panel != null and quit_panel.visible
+
+
+func is_menu_open() -> bool:
+	return (build_panel != null and build_panel.visible) or (inspect_panel != null and inspect_panel.visible)
 
 
 func open_audio_overlay() -> void:
@@ -599,6 +763,7 @@ func _refresh_inspect(tw: Node, gold: int) -> void:
 
 	if not _sell_armed:
 		_insp_sell.text = "Sell (+%dg) [S]" % int(tw.get_sell_value())
+
 
 
 func _position_popup(panel: Control, screen_pos: Vector2) -> void:

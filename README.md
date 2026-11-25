@@ -107,6 +107,16 @@ demo/                   实机截图（ashen / ember / 塔展示 / 怪展示）
 - 后处理与 glow 依赖 GPU，软件渲染下会很慢
 - 塔/怪都是运行时拼网格，首次生成有一帧开销（当前规模 < 2 万面，可忽略）
 
+## 存档、退出与建造卡片（v2 更新后补）
+
+- **建造卡片带图**：点空位弹出的 `CONSTRUCT TOWER` 面板改为 2×2 卡片，图标来自原版 `70-pixelfont.js` 的像素图（弓手 / 臼炮 / 雷塔 / 哨所），逐像素还原到 `scripts/pixelicons.gd`，卡片显示名称、热键、金币花费与说明；悬停仍是射程预览。
+- **关卡存档**：自动保存到 `user://savegame.json`（macOS 上是 `~/Library/Application Support/Godot/app_userdata/Cinderwatch · Godot/savegame.json`）。保存内容：关卡、生态区、波次、金币、生命、击杀数、已建塔（位置 + 类型 + 等级）。触发时机：每波清空后、建塔 / 升级 / 卖塔后、手动 `F5`、退出时。
+- **读档**：启动自动读取存档并恢复塔（直接按等级重建，无建造动画）。想重新开局加 `--fresh`；`--level=N` 指定关卡。
+- **退出**：底部栏新增 `Save [F5]` 与 `Exit [Esc]`；`Esc` 打开确认面板（Keep playing / Save & Exit / Exit），`Esc` 再按一次关闭面板。
+- 音频菜单保持可用，音量与静音状态另存于 `user://cinderwatch.cfg`。
+
+调试用命令行参数（不进正式 UI）：`-- --demo=build` 启动后自动点开一个空位的建造面板；`-- --demo=quit` 自动弹出退出确认；`-- --shot=<绝对路径>:<帧数>` 到帧数后截图并退出。
+
 ## 许可
 
 原版 Cinderwatch 为 MIT（Copyright (c) 2026 kevintngo）。本移植沿用 MIT，保留原作者署名。

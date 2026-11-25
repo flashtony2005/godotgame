@@ -22,6 +22,7 @@ const PostScript = preload("res://scripts/post.gd")
 const HUDScript = preload("res://scripts/hud.gd")
 
 const CFG_PATH := "user://cinderwatch.cfg"
+const SAVE_PATH := "user://savegame.json"
 const MAX_LIVES := 20
 
 # Core subsystems
@@ -48,6 +49,9 @@ var level_num := 1
 var biome_idx := 0
 var next_biome_idx := 1
 var seed_override := -1
+var _args_fresh := false
+var _demo_t := -1.0
+var _demo_kind := ""
 
 var lives := MAX_LIVES
 var gold := 175
@@ -116,6 +120,8 @@ func _ready() -> void:
 	_setup_environment_and_camera()
 	_setup_subsystems()
 	_start_level(level_num, biome_idx, seed_override, true)
+	if not _args_fresh:
+		_try_resume()
 
 
 func _load_config() -> void:
@@ -134,6 +140,103 @@ func _save_config() -> void:
 	cfg.save(CFG_PATH)
 
 
+func _save_game(quiet: bool = false) -> void:
+	var tw_list: Array = []
+	for t in towers:
+		if is_instance_valid(t):
+			tw_list.append({"pad": int(t.pad_idx), "kind": String(t.kind), "lvl": int(t.level)})
+	var data := {
+		"version": 1,
+		"stamp": Time.get_datetime_string_from_system(false, true),
+		"level": level_num,
+		"biome": biome_idx,
+		"wave": wave,
+		"gold": gold,
+		"lives": lives,
+		"slain": slain,
+		"best_wave": best_wave,
+		"towers": tw_list,
+	}
+	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if f == null:
+		return
+	f.store_string(JSON.stringify(data))
+	f.close()
+	print("[save] wrote ", SAVE_PATH, " level=", level_num, " wave=", wave, " towers=", tw_list.size())
+	if not quiet and hud != null:
+		hud.show_banner("GAME SAVED", "Stage %d  •  Wave %d  •  %dg" % [level_num, wave, gold], Color(0.62, 0.90, 0.62), 1.8)
+
+
+func _load_save() -> Dictionary:
+	if not FileAccess.file_exists(SAVE_PATH):
+		return {}
+	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	if f == null:
+		return {}
+	var txt := f.get_as_text()
+	f.close()
+	var parsed: Variant = JSON.parse_string(txt)
+	if parsed is Dictionary:
+		return parsed
+	return {}
+
+
+func _try_resume() -> bool:
+	var d := _load_save()
+	if d.is_empty():
+		return false
+	var lv := maxi(1, int(d.get("level", 1)))
+	var bio := int(d.get("biome", 0))
+	_start_level(lv, bio, seed_override, true)
+	gold = int(d.get("gold", gold))
+	lives = clampi(int(d.get("lives", lives)), 1, MAX_LIVES)
+	slain = int(d.get("slain", 0))
+	wave = maxi(0, int(d.get("wave", 0)))
+	best_wave = maxi(best_wave, int(d.get("best_wave", 0)))
+	wave_active = false
+	wave_timer = 5.0
+	wave_wait_max = 5.0
+
+	var list: Array = d.get("towers", [])
+	var restored := 0
+	for e in list:
+		if not (e is Dictionary):
+			continue
+		var pi := int(e.get("pad", -1))
+		if pi < 0 or pi >= world.pads.size():
+			continue
+		var pd: Dictionary = world.pads[pi]
+		if bool(pd["occupied"]):
+			continue
+		var tw: Node3D = TowerScript.new()
+		tw.name = "tower_%d" % pi
+		add_child(tw)
+		var pos := Vector3(float(pd["x"]), float(pd["y"]) + 0.24, float(pd["z"]))
+		tw.restore(pi, String(e.get("kind", "archer")), int(e.get("lvl", 0)), pos, level_num * 97 + pi * 31, fx, audio)
+		pd["occupied"] = true
+		pd["tower"] = tw
+		towers.append(tw)
+		if String(tw.kind) == "guard":
+			_sync_guard_footmen(tw)
+		restored += 1
+
+	print("[save] loaded level=", level_num, " wave=", wave, " towers=", restored)
+	hud.set_best_wave(best_wave)
+	hud.show_banner("SAVE LOADED", "Stage %d  •  Wave %d  •  %d towers restored" % [level_num, wave, restored], Color(0.62, 0.86, 1.0), 2.4)
+	return true
+
+
+func _on_save_cmd() -> void:
+	_save_game(false)
+
+
+func _on_quit(save_first: bool) -> void:
+	if save_first:
+		_save_game(true)
+	_save_config()
+	get_tree().quit()
+
+
 func _parse_cli_args() -> void:
 	var args := OS.get_cmdline_user_args()
 	for a in args:
@@ -141,6 +244,14 @@ func _parse_cli_args() -> void:
 			seed_override = int(a.substr(7))
 		elif a.begins_with("--level="):
 			level_num = maxi(1, int(a.substr(8)))
+		elif a == "--fresh":
+			_args_fresh = true
+		elif a == "--demo=build":
+			_demo_t = 2.2
+			_demo_kind = "build"
+		elif a == "--demo=quit":
+			_demo_t = 2.2
+			_demo_kind = "quit"
 
 
 func _setup_environment_and_camera() -> void:
@@ -273,6 +384,8 @@ func _setup_subsystems() -> void:
 	hud.cmd_hover_build.connect(_on_hover_build)
 	hud.cmd_upgrade.connect(_on_upgrade_cmd)
 	hud.cmd_sell.connect(_on_sell_cmd)
+	hud.cmd_save.connect(_on_save_cmd)
+	hud.cmd_quit.connect(_on_quit)
 	hud.cmd_close_menu.connect(func() -> void:
 		selected_pad = -1
 		hover_build_kind = ""
@@ -494,6 +607,14 @@ func _update_transitions(dt: float) -> void:
 # ============================================================================
 
 func _process(delta: float) -> void:
+	if _demo_t > 0.0:
+		_demo_t -= delta
+		if _demo_t <= 0.0:
+			if _demo_kind == "quit":
+				hud.open_quit_panel()
+			else:
+				_demo_open_build()
+
 	var dt := minf(delta, 0.05)
 	real_time += dt
 	fade_v = minf(1.0, fade_v + dt * 1.4)
@@ -572,6 +693,7 @@ func _step_waves(dt: float) -> void:
 				best_wave = wave
 				hud.set_best_wave(best_wave)
 				_save_config()
+			_save_game(true)
 
 			# Every 5th wave (Boss Wave) clears the realm and advances to the next Biome!
 			if (wave % 5) == 0 and wave > 0:
@@ -821,6 +943,7 @@ func _build_tower(pad_idx: int, kind: String) -> bool:
 	_focus_timer = 2.4
 	if selected_pad == pad_idx:
 		hud.close_menus()
+	_save_game(true)
 	return true
 
 
@@ -841,6 +964,7 @@ func _upgrade_tower(pad_idx: int) -> bool:
 		_sync_guard_footmen(tw)
 	if selected_pad == pad_idx:
 		hud.refresh_menu_gold(gold, tw)
+	_save_game(true)
 	return true
 
 
@@ -872,6 +996,7 @@ func _sell_tower(pad_idx: int) -> void:
 	pd["occupied"] = false
 	pd["tower"] = null
 	hud.close_menus()
+	_save_game(true)
 
 
 func _sync_guard_footmen(tw: Node3D) -> void:
@@ -1653,10 +1778,16 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_SPACE, KEY_ENTER:
 				_on_call_wave()
 			KEY_ESCAPE:
-				if hud.is_audio_overlay_open():
+				if hud.is_quit_panel_open():
+					hud.close_quit_panel()
+				elif hud.is_audio_overlay_open():
 					hud.close_audio_overlay()
-				else:
+				elif hud.is_menu_open():
 					hud.close_menus()
+				else:
+					hud.open_quit_panel()
+			KEY_F5:
+				_on_save_cmd()
 			KEY_1:
 				if selected_pad >= 0: _on_build_cmd(selected_pad, "archer")
 			KEY_2:
@@ -1747,6 +1878,20 @@ func _update_pad_hover(screen_pos: Vector2) -> void:
 				hover_fx.show_range("pad", 1.55, 0.0, p, 0.85)
 		else:
 			hover_fx.hide_range()
+
+
+func _demo_open_build() -> void:
+	## 调试：自动点开第一个空位的建造面板（截图用）
+	for i in world.pads.size():
+		if bool(world.pads[i]["occupied"]):
+			continue
+		var pd: Dictionary = world.pads[i]
+		var wp := Vector3(float(pd["x"]), float(pd["y"]) + 0.3, float(pd["z"]))
+		var sp := cam.unproject_position(wp)
+		if sp.x < 120.0 or sp.y < 90.0 or sp.x > 1200.0 or sp.y > 760.0:
+			continue
+		_handle_world_click(sp)
+		return
 
 
 func _handle_world_click(screen_pos: Vector2) -> void:

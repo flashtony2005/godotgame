@@ -56,6 +56,22 @@ func setup(p_pad_idx: int, p_kind: String, p_pos: Vector3, p_seed: int, fx_node:
 	_start_construction(fx_node, audio_node)
 
 
+func restore(p_pad_idx: int, p_kind: String, p_level: int, p_pos: Vector3, p_seed: int, fx_node: Node, audio_node: Node) -> void:
+	## 直接按存档等级重建一座已完工的塔（读档用，跳过建造动画）
+	pad_idx = p_pad_idx
+	kind = p_kind
+	level = clampi(p_level, 0, 2)
+	position = p_pos
+	_rng = U.make_rng(p_seed)
+	stats = Defs.tw(kind, level)
+	var tc := 0
+	for lv in level + 1:
+		tc += int(Defs.tw(kind, lv)["cost"])
+	total_cost = tc
+	_start_construction(fx_node, audio_node)
+	_finish_construction(fx_node, audio_node)
+
+
 func upgrade(fx_node: Node, audio_node: Node) -> bool:
 	if level >= 2 or building:
 		return false
