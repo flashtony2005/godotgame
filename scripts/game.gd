@@ -54,6 +54,7 @@ var seed_override := -1
 var _args_fresh := false
 var _demo_t := -1.0
 var _demo_kind := ""
+var _zap_test := -1.0
 
 var lives := MAX_LIVES
 var gold := START_GOLD
@@ -266,6 +267,8 @@ func _parse_cli_args() -> void:
 		elif a == "--demo=restart":
 			_demo_t = 2.2
 			_demo_kind = "restart"
+		elif a == "--zap-test":
+			_zap_test = 1.5
 		elif a == "--demo=restart-run":
 			_demo_t = 3.0
 			_demo_kind = "restart-run"
@@ -625,6 +628,11 @@ func _update_transitions(dt: float) -> void:
 # ============================================================================
 
 func _process(delta: float) -> void:
+	if _zap_test > 0.0:
+		_zap_test -= delta
+		if _zap_test <= 0.0:
+			_run_zap_test()
+
 	if _demo_t > 0.0:
 		_demo_t -= delta
 		if _demo_t <= 0.0:
@@ -730,6 +738,9 @@ func _step_waves(dt: float) -> void:
 
 func _start_next_wave() -> void:
 	wave += 1
+	if OS.get_cmdline_user_args().has("--zap-log"):
+		print("[wave] start ", wave, " monsters=", monsters.size(), " towers=", towers.size())
+
 	wave_active = true
 	wave_queue.clear()
 	var is_boss := (wave % 5) == 0
@@ -909,7 +920,7 @@ func _step_ai_commander(dt: float) -> void:
 				for j in range(0, world.path_pts.size(), 3):
 					var pp: Vector3 = world.path_pts[j]
 					var d := U.dist2(px, pz, pp.x, pp.z)
-					if d <= rng_r:
+					if d <= rng_r * rng_r:
 						hits += 1.0
 				if want_kind == "guard":
 					hits += maxf(0.0, 6.0 - world.dist_to_road(px, pz)) * 2.5
@@ -960,6 +971,8 @@ func _build_tower(pad_idx: int, kind: String) -> bool:
 
 	if kind == "guard":
 		_sync_guard_footmen(tw)
+	if OS.get_cmdline_user_args().has("--zap-log"):
+		print("[build] kind=", kind, " pad=", pad_idx, " gold=", gold)
 
 	_focus_pos = p
 	_focus_timer = 2.4
@@ -1109,7 +1122,7 @@ func _step_towers(dt: float) -> void:
 				continue
 			var mp: Vector3 = m["pos"]
 			var d := U.dist2(tp.x, tp.z, mp.x, mp.z)
-			if d <= rng_r and d >= min_r and float(m["dist"]) > best_dist:
+			if d <= rng_r * rng_r and d >= min_r * min_r and float(m["dist"]) > best_dist:
 				best_dist = float(m["dist"])
 				best_m = m
 
@@ -1143,7 +1156,7 @@ func _step_towers(dt: float) -> void:
 			audio.play_sfx("cannon", 0.0, 0.78)
 
 		elif kind == "spire":
-			var chains := int(st.get("chain", 2))
+			var chains := int(st.get("chains", st.get("jumps", 2)))
 			var dmg := float(st["dmg"])
 			var cur_p := fire_p
 			var hit_list: Array = []
@@ -1155,6 +1168,10 @@ func _step_towers(dt: float) -> void:
 				fx.fx_bolt(cur_p.x, cur_p.y, cur_p.z, mp.x, mp.y, mp.z, 0x9ce8ff, 0.24 - float(c_i) * 0.03, 0.26)
 				fx.fx_sparks(mp.x, mp.y, mp.z, 6, 3.6, 0x9ce8ff, 0.9)
 				_damage_monster(cur_m, dmg * pow(0.84, float(c_i)), true) # Magic shreds armor
+				var slow_t := float(st.get("slow_t", 1.3)) * (1.0 - float(cur_m.get("slow_res", 0.0)))
+				cur_m["slow_t"] = maxf(float(cur_m["slow_t"]), slow_t)
+				if OS.get_cmdline_user_args().has("--zap-log"):
+					print("[spire] hit ", cur_m["kind"], " dmg=", snappedf(dmg * pow(0.84, float(c_i)), 0.1), " hp=", snappedf(float(cur_m["hp"]), 0.1))
 				hit_list.append(cur_m)
 				cur_p = mp
 				# Jump to next nearest unhit enemy
@@ -1170,6 +1187,8 @@ func _step_towers(dt: float) -> void:
 				cur_m = nxt_m
 			tw.charge_t = 0.0
 			audio.play_sfx("zap", 0.0, 0.78)
+			if OS.is_debug_build() and OS.get_cmdline_user_args().has("--zap-log"):
+				print("[spire] zap dmg=", dmg, " jump=", st.get("jumps", "-"), " hits=", hit_list.size())
 
 
 func _fire_arrow(origin: Vector3, target_m: Dictionary, dmg: float) -> void:
@@ -1264,7 +1283,7 @@ func _step_projectiles(dt: float) -> void:
 			for m in monsters:
 				if bool(m["dying"]) or float(m["fly"]) > 0.1:
 					continue
-				var md := U.dist2(p1.x, p1.z, m["pos"].x, m["pos"].z)
+				var md := sqrt(U.dist2(p1.x, p1.z, m["pos"].x, m["pos"].z))
 				if md <= rad:
 					var falloff := lerpf(1.0, 0.45, md / maxf(0.1, rad))
 					_damage_monster(m, float(s["dmg"]) * falloff, false)
@@ -1293,7 +1312,7 @@ func _step_footmen(dt: float) -> void:
 		var pos: Vector3 = fm["pos"]
 		var rally: Vector3 = fm["rally"]
 		var tgt = fm["target"]
-		if tgt != null and (not monsters.has(tgt) or bool(tgt["dying"]) or U.dist2(rally.x, rally.z, tgt["pos"].x, tgt["pos"].z) > 5.2):
+		if tgt != null and (not monsters.has(tgt) or bool(tgt["dying"]) or sqrt(U.dist2(rally.x, rally.z, tgt["pos"].x, tgt["pos"].z)) > 5.2):
 			if tgt != null and tgt.get("engaged") == fm:
 				tgt["engaged"] = null
 			fm["target"] = null
@@ -1306,7 +1325,7 @@ func _step_footmen(dt: float) -> void:
 					continue
 				if m["engaged"] != null and m["engaged"] != fm:
 					continue
-				var d := U.dist2(rally.x, rally.z, m["pos"].x, m["pos"].z)
+				var d := sqrt(U.dist2(rally.x, rally.z, m["pos"].x, m["pos"].z))
 				if d < best_d:
 					best_d = d
 					tgt = m
@@ -1426,7 +1445,7 @@ func _step_monsters(dt: float) -> void:
 				fx.add_shake(0.38)
 				audio.play_sfx("bossStep", 0.0, 1.0)
 				for tw in towers:
-					if not tw.building and U.dist2(pos.x, pos.z, tw.global_position.x, tw.global_position.z) < 6.8:
+					if not tw.building and sqrt(U.dist2(pos.x, pos.z, tw.global_position.x, tw.global_position.z)) < 6.8:
 						tw.stun = 3.0
 			else:
 				m["spec_cd"] = 99.0
@@ -1878,7 +1897,7 @@ func _pick_pad_at(screen_pos: Vector2) -> int:
 	var best_d := 2.25
 	for i in world.pads.size():
 		var pd: Dictionary = world.pads[i]
-		var d := U.dist2(hit.x, hit.z, float(pd["x"]), float(pd["z"]))
+		var d := sqrt(U.dist2(hit.x, hit.z, float(pd["x"]), float(pd["z"])))
 		if d < best_d:
 			best_d = d
 			best = i
@@ -1904,6 +1923,27 @@ func _update_pad_hover(screen_pos: Vector2) -> void:
 				hover_fx.show_range("pad", 1.55, 0.0, p, 0.85)
 		else:
 			hover_fx.hide_range()
+
+
+func _run_zap_test() -> void:
+	## 调试：在离路起点最近的空位建一座雷塔，并把一只骷髅直接放到射程内
+	var best_i := -1
+	var best_d := 1e18
+	for i in world.pads.size():
+		if bool(world.pads[i]["occupied"]):
+			continue
+		var pd: Dictionary = world.pads[i]
+		var d := U.dist2(float(pd["x"]), float(pd["z"]), world.path_pts[2].x, world.path_pts[2].z)
+		if d < best_d:
+			best_d = d
+			best_i = i
+	if best_i < 0:
+		print("[zap-test] no free pad")
+		return
+	_build_tower(best_i, "spire")
+	_spawn_monster("skel", 0.0, 0.0)
+	_spawn_monster("knight", 0.4, 0.0)
+	print("[zap-test] spire pad=", best_i, " monsters=", monsters.size())
 
 
 func _demo_open_build() -> void:
