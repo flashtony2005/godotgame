@@ -24,6 +24,8 @@ const HUDScript = preload("res://scripts/hud.gd")
 const CFG_PATH := "user://cinderwatch.cfg"
 const SAVE_PATH := "user://savegame.json"
 const MAX_LIVES := 20
+const START_GOLD := 650
+const LEVEL_GOLD_BONUS := 300
 
 # Core subsystems
 var world_env: WorldEnvironment
@@ -54,7 +56,7 @@ var _demo_t := -1.0
 var _demo_kind := ""
 
 var lives := MAX_LIVES
-var gold := 175
+var gold := START_GOLD
 var slain := 0
 var wave := 0
 var best_wave := 0
@@ -453,14 +455,14 @@ func _start_level(p_level: int, p_biome: int, p_seed: int, instant_appear: bool)
 	# Starting economy scales gently with level
 	if _is_defeat_reset or level_num == 1:
 		lives = MAX_LIVES
-		gold = 175
+		gold = START_GOLD
 		slain = 0
 		wave = 0
 		press = 1.0
 		_is_defeat_reset = false
 	else:
 		lives = mini(MAX_LIVES, lives + 6)
-		gold += 140
+		gold += LEVEL_GOLD_BONUS
 
 	wave_active = false
 	wave_timer = 3.6
