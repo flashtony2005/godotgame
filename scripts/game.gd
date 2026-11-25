@@ -228,6 +228,15 @@ func _try_resume() -> bool:
 	return true
 
 
+func _on_restart() -> void:
+	var dir := DirAccess.open("user://")
+	if dir != null and dir.file_exists("savegame.json"):
+		dir.remove("savegame.json")
+	_start_level(1, 0, seed_override, true)
+	_save_game(true)
+	hud.show_banner("NEW RUN", "Stage 1  •  %dg  •  Fresh start" % gold, Color(0.95, 0.85, 0.55), 2.2)
+
+
 func _on_save_cmd() -> void:
 	_save_game(false)
 
@@ -254,6 +263,12 @@ func _parse_cli_args() -> void:
 		elif a == "--demo=quit":
 			_demo_t = 2.2
 			_demo_kind = "quit"
+		elif a == "--demo=restart":
+			_demo_t = 2.2
+			_demo_kind = "restart"
+		elif a == "--demo=restart-run":
+			_demo_t = 3.0
+			_demo_kind = "restart-run"
 
 
 func _setup_environment_and_camera() -> void:
@@ -387,6 +402,7 @@ func _setup_subsystems() -> void:
 	hud.cmd_upgrade.connect(_on_upgrade_cmd)
 	hud.cmd_sell.connect(_on_sell_cmd)
 	hud.cmd_save.connect(_on_save_cmd)
+	hud.cmd_restart.connect(_on_restart)
 	hud.cmd_quit.connect(_on_quit)
 	hud.cmd_close_menu.connect(func() -> void:
 		selected_pad = -1
@@ -614,6 +630,10 @@ func _process(delta: float) -> void:
 		if _demo_t <= 0.0:
 			if _demo_kind == "quit":
 				hud.open_quit_panel()
+			elif _demo_kind == "restart":
+				hud.open_restart_panel()
+			elif _demo_kind == "restart-run":
+				_on_restart()
 			else:
 				_demo_open_build()
 
@@ -1779,8 +1799,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				_on_follow_cam()
 			KEY_SPACE, KEY_ENTER:
 				_on_call_wave()
+			KEY_R:
+				hud.open_restart_panel()
 			KEY_ESCAPE:
-				if hud.is_quit_panel_open():
+				if hud.is_restart_panel_open():
+					hud.close_restart_panel()
+				elif hud.is_quit_panel_open():
 					hud.close_quit_panel()
 				elif hud.is_audio_overlay_open():
 					hud.close_audio_overlay()

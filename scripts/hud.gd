@@ -27,6 +27,7 @@ signal cmd_sell(pad_idx: int)
 signal cmd_close_menu()
 signal cmd_save()
 signal cmd_quit(save_first: bool)
+signal cmd_restart()
 
 # Custom 2D canvas overlay for health bars, flying coins, title card, banners, tips
 var overlay: Control
@@ -41,6 +42,7 @@ var inspect_panel: PanelContainer
 var audio_backdrop: ColorRect
 var audio_overlay: PanelContainer
 var quit_panel: PanelContainer
+var restart_panel: PanelContainer
 
 # Dynamic labels & buttons
 var lbl_lives: Label
@@ -326,6 +328,12 @@ func _build_bottom_bar() -> void:
 	btn_follow.pressed.connect(func() -> void: cmd_follow_cam.emit())
 	hb.add_child(btn_follow)
 
+	var b_restart := Button.new()
+	b_restart.text = "Restart [R]"
+	_style_button(b_restart)
+	b_restart.pressed.connect(func() -> void: open_restart_panel())
+	hb.add_child(b_restart)
+
 	var b_save := Button.new()
 	b_save.text = "Save [F5]"
 	_style_button(b_save)
@@ -478,6 +486,11 @@ func _build_context_menus() -> void:
 	ihb.add_child(_insp_sell)
 
 
+	# Restart confirmation panel
+	restart_panel = _make_confirm_panel("START OVER?", "Level 1 · Wave 0 · current save is cleared", "Restart", func() -> void:
+		restart_panel.visible = false
+		cmd_restart.emit()
+	)
 	# Quit / Exit confirmation panel
 	quit_panel = PanelContainer.new()
 	quit_panel.add_theme_stylebox_override("panel", _style_plate)
@@ -640,7 +653,7 @@ func dismiss_title() -> void:
 func is_pointer_over_ui(pos: Vector2) -> bool:
 	if audio_backdrop != null and audio_backdrop.visible:
 		return true
-	for p in [top_left, top_center, top_right, bottom_bar, build_panel, inspect_panel, quit_panel]:
+	for p in [top_left, top_center, top_right, bottom_bar, build_panel, inspect_panel, quit_panel, restart_panel]:
 		if p != null and p.visible and p.get_global_rect().has_point(pos):
 			return true
 	return false
@@ -648,6 +661,65 @@ func is_pointer_over_ui(pos: Vector2) -> bool:
 
 func is_audio_overlay_open() -> bool:
 	return audio_backdrop != null and audio_backdrop.visible
+
+
+func _make_confirm_panel(title: String, sub: String, ok_text: String, ok_cb: Callable) -> PanelContainer:
+	var p := PanelContainer.new()
+	p.add_theme_stylebox_override("panel", _style_plate)
+	p.visible = false
+	p.anchor_left = 0.5
+	p.anchor_right = 0.5
+	p.anchor_top = 0.5
+	p.anchor_bottom = 0.5
+	p.offset_left = -172
+	p.offset_right = 172
+	p.offset_top = -60
+	p.offset_bottom = 60
+	add_child(p)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 8)
+	p.add_child(vb)
+
+	var t := _mk_stat_lbl(title, Color(0.95, 0.78, 0.42))
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(t)
+
+	var s2 := _mk_stat_lbl(sub, Color(0.62, 0.62, 0.60))
+	s2.add_theme_font_size_override("font_size", 11)
+	s2.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(s2)
+
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 8)
+	vb.add_child(row)
+
+	var cancel := Button.new()
+	cancel.text = "Keep playing"
+	_style_button(cancel)
+	cancel.pressed.connect(func() -> void: p.visible = false)
+	row.add_child(cancel)
+
+	var ok := Button.new()
+	ok.text = ok_text
+	_style_button(ok)
+	ok.pressed.connect(ok_cb)
+	row.add_child(ok)
+	return p
+
+
+func open_restart_panel() -> void:
+	close_menus()
+	restart_panel.visible = true
+
+
+func close_restart_panel() -> void:
+	restart_panel.visible = false
+
+
+func is_restart_panel_open() -> bool:
+	return restart_panel != null and restart_panel.visible
 
 
 func open_quit_panel() -> void:
