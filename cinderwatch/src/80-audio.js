@@ -1,5 +1,5 @@
 const AU = (function () {
-  const api = { ready: false, muted: false, unlock: unlock, setMuted: setMuted, setPaused: setPaused, play: play, setAmbience: setAmbience, update: update };
+  const api = { ready: false, muted: false, volume: 1, unlock: unlock, setMuted: setMuted, setVolume: setVolume, setPaused: setPaused, play: play, setAmbience: setAmbience, update: update };
 
   let ctx = null, sr = 44100;
   let nMaster = null, nMute = null, nSfx = null, nAmb = null, nMusic = null, nRevIn = null;
@@ -552,7 +552,10 @@ const AU = (function () {
     lim.threshold.value = -8; lim.knee.value = 4; lim.ratio.value = 16; lim.attack.value = 0.002; lim.release.value = 0.18;
     lim.connect(ctx.destination);
     const sh = (dest, type, f, g, q) => { const b = flt(dest, type, f, q); b.gain.value = g; return b; };
-    nMaster = gn(sh(sh(sh(flt(flt(lim, 'highpass', 32, 0.7), 'highpass', 32, 0.7), 'highshelf', 3000, 6), 'peaking', 1200, 3, 0.7), 'lowshelf', 180, -10), 0); nMaster.gain.setValueAtTime(0.0001, ctx.currentTime); nMaster.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 0.6);
+    nMaster = gn(sh(sh(sh(flt(flt(lim, 'highpass', 32, 0.7), 'highpass', 32, 0.7), 'highshelf', 3000, 6), 'peaking', 1200, 3, 0.7), 'lowshelf', 180, -10), 0);
+    const targetMaster = Math.max(0.0001, AUDIO_STATE.BASE_MASTER_GAIN * AUDIO_STATE.clampVolume(api.volume));
+    nMaster.gain.setValueAtTime(0.0001, ctx.currentTime);
+    nMaster.gain.linearRampToValueAtTime(targetMaster, ctx.currentTime + 0.6);
     nMute = gn(nMaster, api.muted ? 0 : 1);
     nSfx = gn(nMute, 1); nAmb = gn(nMute, 0.9); nMusic = gn(nMute, 0.5);
     makeBuffers();
@@ -582,6 +585,14 @@ const AU = (function () {
   function setMuted(b) {
     api.muted = !!b;
     if (ctx && nMute) nMute.gain.setTargetAtTime(api.muted ? 0 : 1, ctx.currentTime, 0.06);
+  }
+  function setVolume(v) {
+    api.volume = AUDIO_STATE.clampVolume(v);
+    if (ctx && nMaster) {
+      const now = ctx.currentTime;
+      nMaster.gain.cancelScheduledValues(now);
+      nMaster.gain.setTargetAtTime(AUDIO_STATE.BASE_MASTER_GAIN * api.volume, now, 0.03);
+    }
   }
   function setP(key, param, v, now) { if (Math.abs(v - app[key]) > 0.004) { app[key] = v; param.setTargetAtTime(v, now, 0.12); } }
   function update(dt) {

@@ -1,578 +1,587 @@
 extends Node3D
+## Complete Instanced PartBatch Skeletal Rig System & 26-Creature Bestiary Renderer
+## (ported & enhanced from 50-rig.js, 51-bestiary.js, 61-monsters.js).
+## Renders every monster, boss, guard footman, tower archer, projectile, gold coin, shatter debris,
+## and empty pad marker via GPU-instanced MultiMeshInstance3D batches with hit flash & biome tints!
 
-## 高模版怪：18 种类型共用 9 套精细骨架（人形 / 四足 / 史莱姆 / 虫 / 飞行 / 怨灵 / 蟾蜍 / 灵体 / 石像）。
-## 每一只都是 Soup 现拼的网格：两段式四肢、关节、装备、布料都有单独部件，行走/挥击靠枢轴旋转。
+const U = preload("res://scripts/util.gd")
+const TX = preload("res://scripts/textures.gd")
+const Soup = preload("res://scripts/soup.gd")
 
-const Defs := preload("res://scripts/defs.gd")
-const MeshKit := preload("res://scripts/meshkit.gd")
-const Soup := preload("res://scripts/soup.gd")
-const IRON_D := Color("3c4048")
+# PartBatch dictionary: name -> {mm: MultiMesh, mmi: MultiMeshInstance3D, cap: int, count: int}
+var batches: Dictionary = {}
 
-var type := "skel"
-var def: Dictionary = {}
-var hp := 1.0
-var max_hp := 1.0
-var s := 0.0
-var lateral := 0.0
-var base_speed := 1.0
-var speed_mul := 1.0
-var slow_amt := 0.0
-var slow_t := 0.0
-var haste := 1.0
-var flying := false
-var alt := 0.0
-var side := 0.0
-var alive := true
-var radius := 0.3
-var body_root: Node3D
-var parts: Dictionary = {}
-var hpbar: Node3D
-var hpfill: MeshInstance3D
-var t := 0.0
-var flash := 0.0
-var atk_cd := 0.5
-var sum_t := 0.0
-var stomp_t := 0.0
-var ghost_t := 0.0
-var ghosting := false
-var enraged := false
-var boss := false
-var yaw := 0.0
-var last_hit := -9.0
-var hit_by_guard := false
-var game = null
+# Dynamic visual physics pools (shatter debris, bouncing coins)
+var debris: Array[Dictionary] = []
+var coins: Array[Dictionary] = []
 
-const SKIN := {
-	"skel": Color("d8d2c0"), "slime": Color("6ac07a"), "slimelet": Color("7ad08a"),
-	"knight": Color("8a92a0"), "ghoul": Color("8c7a86"), "spider": Color("3a3236"),
-	"scarab": Color("4a3a24"), "wolf": Color("6a5a4a"), "bomber": Color("8a6a58"),
-	"wraith": Color("a8d8d0"), "toad": Color("5a7048"), "wisp": Color("c8b0ff"),
-	"drummer": Color("7a6a58"), "gargoyle": Color("7a7264"), "necro": Color("5a4a6a"),
-	"mummy": Color("c8b490"), "brute": Color("7a9a5a"), "golem": Color("7a7a72"),
-	"brood": Color("5a3a48"), "giant": Color("d8d2c0"), "ogre": Color("8a7a4a"),
-	"jotun": Color("a8c8e8"), "queen": Color("6a3a6a"), "colossus": Color("5a3a30"),
-	"king": Color("c8b078"),
-}
 
-func setup(p_type: String, hp_mul: float, p_s: float, p_lat: float, p_game) -> void:
-	type = p_type
-	def = Defs.MON[type]
-	game = p_game
-	max_hp = float(def["hp"]) * hp_mul
-	hp = max_hp
-	s = p_s
-	lateral = p_lat
-	base_speed = float(def["spd"]) * randf_range(0.93, 1.07)
-	radius = float(def["rad"])
-	flying = def.get("fly", false)
-	boss = def.get("boss", false)
-	if flying:
-		alt = randf_range(float(def["alt"][0]), float(def["alt"][1]))
-		side = randf_range(-1.1, 1.1) * (1.4 if def.has("glow") else 1.0)
-	sum_t = float(def.get("summon", {}).get("every", 7.0)) * randf_range(0.45, 0.7) if def.has("summon") else 0.0
-	stomp_t = float(def.get("stomp", {}).get("every", 10.0)) * 0.6 if def.has("stomp") else 0.0
-	atk_cd = randf_range(0.1, 0.5)
-	_build_body()
-	_build_hpbar()
+func _ready() -> void:
+	TX.ensure()
+	_build_all_kits()
 
-func _build_hpbar() -> void:
-	hpbar = Node3D.new()
-	hpbar.position = Vector3(0, float(def["top"]) * float(def["scale"]) + 0.35, 0)
-	add_child(hpbar)
-	MeshKit.box(hpbar, Vector3(0.62, 0.08, 0.02), Vector3.ZERO, Color("141018"))
-	hpfill = MeshKit.box(hpbar, Vector3(0.6, 0.055, 0.03), Vector3(0, 0, 0.01), Color("e8b04a"))
-	hpbar.visible = boss
 
-func _skin() -> Color:
-	var base: Color = SKIN.get(type, Defs.MON_COL["flesh"])
-	var tint: Dictionary = Defs.TINTS.get(game.biome_key, {})
-	if tint.has(type):
-		base = base * tint[type]
-	return base
+func clear_pools() -> void:
+	debris.clear()
+	coins.clear()
 
-func _build_body() -> void:
-	body_root = Node3D.new()
-	var sc := float(def["scale"])
-	body_root.scale = Vector3.ONE * sc
-	add_child(body_root)
-	var c := _skin()
-	var top := float(def["top"])
-	match String(def["body"]):
-		"humanoid": _humanoid(c, top)
-		"quad": _quad(c, top)
-		"blob": _blob(c, top)
-		"bug": _bug(c, top)
-		"bat": _bat(c)
-		"ghost": _ghost(c)
-		"toad": _toad(c)
-		"wisp": _wisp(c)
-		"golem": _golem(c, top)
-		_: _humanoid(c, top)
-	if def.has("glow"):
-		var light := OmniLight3D.new()
-		light.light_color = game.biome_wisp_color
-		light.light_energy = 1.2
-		light.omni_range = 2.6
-		add_child(light)
 
-func _glow_dot(parent: Node3D, pos: Vector3, r: float, col: Color) -> void:
-	var mi := MeshKit.sphere(parent, r, pos, col, 6, 2.4)
-	if mi != null:
-		mi.material_override = MeshKit.mat(col, 2.4, 0.5)
+func begin_frame() -> void:
+	for k in batches:
+		batches[k]["count"] = 0
 
-func _eye_color() -> Color:
-	if type == "ghoul":
-		return Color("ff5a2a")
-	if type == "brute":
-		return Color("ffd24a")
-	return Defs.MON_COL["eye"]
 
-# ---------------------------------------------------------------- 人形
+func end_frame() -> void:
+	for k in batches:
+		var b: Dictionary = batches[k]
+		var mm: MultiMesh = b["mm"]
+		mm.visible_instance_count = int(b["count"])
 
-func _humanoid(c: Color, top: float) -> void:
-	var leg_h := top * 0.42
-	var torso_h := top * 0.34
-	var head_r := top * 0.11
-	var leg_c := c.darkened(0.28)
-	var skin_c := c
-	if type == "skel" or type == "giant" or type == "king":
-		skin_c = Color("cfc8b4")
-	if type == "knight":
-		skin_c = Color("7d848f")
-	# 骨盆
-	var s := Soup.new()
-	s.beam(Vector3(0, leg_h, 0), Vector3(0, leg_h + torso_h * 0.22, 0), top * 0.15, top * 0.14, 6, skin_c.darkened(0.1))
-	# 袍 / 胸甲 / 缠布
-	match type:
-		"knight":
-			s.box(Vector3(0, leg_h + torso_h * 0.6, 0), Vector3(top * 0.32, torso_h * 0.68, top * 0.22), Color("9aa4b4"), Basis.IDENTITY, 0.8, 1.0)
-			s.box(Vector3(0, leg_h + torso_h * 0.55, 0), Vector3(top * 0.34, torso_h * 0.12, top * 0.24), Color("c8d0d8"))
-			s.sphere(Vector3(-top * 0.2, leg_h + torso_h * 0.92, 0), top * 0.11, Color("9aa4b4"), 8, 5, Vector3(1.2, 0.8, 1.1), 0.8, 1.0)
-			s.sphere(Vector3(top * 0.2, leg_h + torso_h * 0.92, 0), top * 0.11, Color("9aa4b4"), 8, 5, Vector3(1.2, 0.8, 1.1), 0.8, 1.0)
-			s.cyl(Vector3(0, leg_h + torso_h + head_r * 1.05, 0), head_r * 1.05, head_r * 1.05, head_r * 1.5, Color("8a92a0"), 8, 0.0, 0.75, 1.0)
-			s.box(Vector3(0, leg_h + torso_h + head_r * 0.95, head_r * 0.8), Vector3(head_r * 1.4, head_r * 0.35, head_r * 0.18), IRON_D)
-		"necro":
-			s.cone(Vector3(0, 0.02, 0), top * 0.31, leg_h + torso_h * 1.3, c.darkened(0.42), 8, 0.0, 0.45)
-			s.sphere(Vector3(0, leg_h + torso_h * 0.7, 0), top * 0.15, Color("c8b490"), 8, 5, Vector3(1, 1.2, 0.8), 0.8)
-			s.cone(Vector3(0, leg_h + torso_h + head_r * 1.4, 0), head_r * 1.5, head_r * 2.6, c.darkened(0.55), 7)
-		"mummy":
-			for k in 5:
-				s.box(Vector3(0, leg_h + torso_h * (0.12 + 0.19 * float(k)), 0), Vector3(top * 0.33, top * 0.045, top * 0.24), Color("a89870"), Basis(Vector3.RIGHT, 0.1 * float(k % 2)))
-			s.cone(Vector3(0, 0.05, 0), top * 0.26, leg_h * 0.95, Color("b8a880"), 7, 0.0, 0.5)
-		"drummer":
-			s.beam(Vector3(0, leg_h, 0), Vector3(0, leg_h + torso_h, 0), top * 0.17, top * 0.15, 6, c)
-			s.sphere(Vector3(0, leg_h + torso_h * 0.55, 0), top * 0.16, c.darkened(0.15), 8, 5, Vector3(1, 1.1, 0.85), 0.75)
-		"brute", "ogre":
-			s.sphere(Vector3(0, leg_h + torso_h * 0.55, 0), top * 0.26, c.lightened(0.12), 10, 6, Vector3(1.05, 0.95, 0.9), 0.6, 1.0)
-			s.box(Vector3(0, leg_h + torso_h * 0.85, 0), Vector3(top * 0.4, top * 0.12, top * 0.3), c.darkened(0.2))
-		"king":
-			s.beam(Vector3(0, leg_h, 0), Vector3(0, leg_h + torso_h, 0), top * 0.18, top * 0.16, 6, Color("a89878"))
-			s.box(Vector3(0, leg_h + torso_h * 0.7, 0), Vector3(top * 0.36, torso_h * 0.6, top * 0.26), Color("6a4a7a"), Basis.IDENTITY, 0.8)
-			for k in 5:
-				var a := TAU * float(k) / 5.0
-				s.cone(Vector3(cos(a) * head_r * 0.75, leg_h + torso_h + head_r * 1.75, sin(a) * head_r * 0.75), head_r * 0.28, head_r * 0.9, Color("e8c860"), 4)
-		_:
-			s.beam(Vector3(0, leg_h, 0), Vector3(0, leg_h + torso_h, 0), top * 0.16, top * 0.13, 6, skin_c)
-			# 肋骨
-			for k in 4:
-				var yy := leg_h + torso_h * (0.35 + 0.16 * float(k))
-				s.box(Vector3(0, yy, 0), Vector3(top * 0.26 - top * 0.03 * float(k), top * 0.025, top * 0.18), skin_c.lightened(0.1))
-			s.box(Vector3(0, leg_h + torso_h * 0.95, 0), Vector3(top * 0.34, top * 0.05, top * 0.2), skin_c.darkened(0.15))
-	# 脖子 + 头
-	var head_y := leg_h + torso_h + head_r * 1.15
-	s.cyl(Vector3(0, leg_h + torso_h + head_r * 0.35, 0), head_r * 0.62, head_r * 0.55, head_r * 0.7, skin_c.darkened(0.15), 6)
-	s.sphere(Vector3(0, head_y, 0), head_r, skin_c.lightened(0.05), 10, 7, Vector3(1.0, 1.06, 1.12), 0.7, 1.0)
-	s.box(Vector3(0, head_y - head_r * 0.55, head_r * 0.28), Vector3(head_r * 0.9, head_r * 0.45, head_r * 0.7), skin_c.darkened(0.12))
-	for sx in [-1.0, 1.0]:
-		s.box(Vector3(sx * head_r * 0.34, head_y + head_r * 0.1, head_r * 0.82), Vector3(head_r * 0.34, head_r * 0.3, head_r * 0.16), Color("181418"))
-	if type == "brute" or type == "ogre":
-		for sx in [-1.0, 1.0]:
-			s.cone(Vector3(sx * head_r * 0.45, head_y - head_r * 0.35, head_r * 0.7), head_r * 0.13, head_r * 0.5, Color("e8e0c8"), 4, 0.0, 0.8)
-	if type == "king":
-		s.cone(Vector3(0, head_y + head_r * 0.85, 0), head_r * 0.9, head_r * 1.4, Color("8a2f4a"), 7)
-	# 眼
-	var eye_c := _eye_color()
-	for sx in [-1.0, 1.0]:
-		_glow_dot(body_root, Vector3(sx * head_r * 0.3, head_y + head_r * 0.12, head_r * 0.78), head_r * 0.17, eye_c)
-	# 腿（髋枢轴，两段）
-	for sx in [-1.0, 1.0]:
-		var hip := MeshKit.pivot(body_root, Vector3(sx * top * 0.09, leg_h, 0))
-		var ls := Soup.new()
-		ls.beam(Vector3(0, 0, 0), Vector3(0, -leg_h * 0.52, 0.01), top * 0.075, top * 0.06, 6, leg_c)
-		ls.sphere(Vector3(0, -leg_h * 0.53, 0.01), top * 0.062, leg_c.lightened(0.08), 8, 5)
-		ls.beam(Vector3(0, -leg_h * 0.53, 0.01), Vector3(0, -leg_h * 0.96, 0.03), top * 0.055, top * 0.045, 6, leg_c)
-		ls.box(Vector3(0, -leg_h * 0.99, top * 0.05), Vector3(top * 0.13, top * 0.06, top * 0.22), leg_c.darkened(0.35), Basis.IDENTITY, 0.6, 0.9)
-		ls.instance(hip, "leg")
-		parts["legL" if sx < 0.0 else "legR"] = hip
-	# 手臂（肩枢轴）
-	for sx in [-1.0, 1.0]:
-		var sh := MeshKit.pivot(body_root, Vector3(sx * top * 0.19, leg_h + torso_h * 0.88, 0))
-		var as_ := Soup.new()
-		as_.sphere(Vector3(0, 0, 0), top * 0.075, skin_c.lightened(0.12), 8, 5)
-		as_.beam(Vector3(0, 0, 0), Vector3(sx * top * 0.02, -torso_h * 0.5, top * 0.02), top * 0.065, top * 0.052, 6, skin_c.darkened(0.08))
-		as_.sphere(Vector3(sx * top * 0.02, -torso_h * 0.52, top * 0.02), top * 0.055, skin_c, 7, 5)
-		as_.beam(Vector3(sx * top * 0.02, -torso_h * 0.52, top * 0.02), Vector3(sx * top * 0.04, -torso_h * 0.95, top * 0.06), top * 0.05, top * 0.04, 6, skin_c.darkened(0.08))
-		as_.sphere(Vector3(sx * top * 0.04, -torso_h * 0.98, top * 0.06), top * 0.05, skin_c.darkened(0.02), 7, 5, Vector3(1, 1.15, 1), 0.6, 1.0)
-		# 武器
-		if sx > 0.0 and (def.get("boss", false) or type in ["skel", "knight", "giant", "king", "necro", "bomber", "mummy", "ghoul"]):
-			var bl := top * 0.62
-			as_.box(Vector3(0, -torso_h * 1.0, top * 0.06), Vector3(top * 0.055, top * 0.16, top * 0.05), Color("5a4632"))
-			as_.box(Vector3(0, -torso_h * 1.0 - top * 0.08, top * 0.06), Vector3(top * 0.22, top * 0.045, top * 0.05), Color("8a8a92"))
-			as_.beam(Vector3(0, -torso_h * 1.0 - top * 0.1, top * 0.06), Vector3(0, -torso_h * 1.0 - top * 0.1 - bl, top * 0.06), top * 0.032, top * 0.008, 4, Color("d8dee8"), 0.0, 0.85, 1.0)
-		if type == "drummer":
-			as_.beam(Vector3(0, -torso_h * 0.95, 0), Vector3(-top * 0.05, -torso_h * 1.02, top * 0.12), top * 0.02, top * 0.015, 4, Color("c8b490"))
-		as_.instance(sh, "arm")
-		parts["armL" if sx < 0.0 else "armR"] = sh
-	# 鼓
-	if type == "drummer":
-		s.cyl(Vector3(0, leg_h * 0.55, top * 0.16), top * 0.18, top * 0.2, top * 0.24, Color("8a6a4a"), 8, 0.0, 0.55, 0.95)
-		for yy in [-0.1, 0.1]:
-			s.cyl(Vector3(0, leg_h * 0.55 + yy, top * 0.16), top * 0.2, top * 0.2, top * 0.03, Color("3a2a1e"), 8)
-		s.box(Vector3(0, leg_h * 0.55, top * 0.09), Vector3(top * 0.34, top * 0.02, top * 0.02), Color("3a2a1e"))
-	s.instance(body_root, "body")
-	# 骑士盾
-	if type == "knight":
-		var sh2 := Soup.new()
-		sh2.beam(Vector3(-top * 0.28, leg_h + torso_h * 0.75, top * 0.02), Vector3(-top * 0.3, leg_h + torso_h * 0.25, top * 0.05), top * 0.16, top * 0.19, 6, Color("5a6470"), 0.0, 0.8, 1.0)
-		sh2.box(Vector3(-top * 0.3, leg_h + torso_h * 0.5, top * 0.06), Vector3(top * 0.05, top * 0.2, top * 0.03), Color("c8d0d8"))
-		sh2.instance(body_root, "shield")
 
-# ---------------------------------------------------------------- 四足
+func _reg(key: String, sp: Soup, cap: int, cast_sh: bool = true) -> void:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = false
+	mm.use_custom_data = true
+	mm.mesh = sp.build()
+	mm.instance_count = cap
+	mm.visible_instance_count = 0
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "kit_%s" % key
+	mmi.multimesh = mm
+	mmi.material_override = TX.mat_inst
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if cast_sh else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mmi.extra_cull_margin = 160.0
+	add_child(mmi)
+	batches[key] = {"mm": mm, "mmi": mmi, "cap": cap, "count": 0}
 
-func _quad(c: Color, top: float) -> void:
-	var bl := top * 1.5
-	var s := Soup.new()
-	# 躯干：胸 + 腰 + 臀三节，收放有致
-	s.sphere(Vector3(0, top * 0.42, -bl * 0.3), top * 0.3, c, 10, 6, Vector3(0.9, 0.95, 1.25), 0.6, 1.0)
-	s.sphere(Vector3(0, top * 0.42, bl * 0.05), top * 0.27, c.darkened(0.05), 10, 6, Vector3(0.85, 0.9, 1.2), 0.6, 1.0)
-	s.sphere(Vector3(0, top * 0.44, bl * 0.4), top * 0.25, c.darkened(0.1), 9, 6, Vector3(0.85, 0.9, 1.0), 0.6, 1.0)
-	# 颈 + 头 + 吻 + 耳 + 下颌
-	s.beam(Vector3(0, top * 0.5, -bl * 0.5), Vector3(0, top * 0.62, -bl * 0.75), top * 0.19, top * 0.15, 7, c)
-	s.sphere(Vector3(0, top * 0.63, -bl * 0.8), top * 0.19, c.lightened(0.08), 10, 6, Vector3(1.0, 0.95, 1.15), 0.65, 1.0)
-	s.beam(Vector3(0, top * 0.6, -bl * 0.9), Vector3(0, top * 0.56, -bl * 1.05), top * 0.1, top * 0.075, 5, c.darkened(0.05))
-	s.box(Vector3(0, top * 0.53, -bl * 1.0), Vector3(top * 0.11, top * 0.05, top * 0.18), c.darkened(0.3))
-	for sx in [-1.0, 1.0]:
-		s.cone(Vector3(sx * top * 0.1, top * 0.76, -bl * 0.72), top * 0.055, top * 0.16, c.darkened(0.15), 4, 0.3)
-		s.box(Vector3(sx * top * 0.5, top * 0.44, -bl * 0.35), Vector3(top * 0.1, top * 0.24, top * 0.3), c.darkened(0.18))
-	_glow_dot(body_root, Vector3(top * 0.09, top * 0.68, -bl * 0.92), top * 0.045, _eye_color())
-	_glow_dot(body_root, Vector3(-top * 0.09, top * 0.68, -bl * 0.92), top * 0.045, _eye_color())
-	# 背脊鬃毛（只在肩背一小段，短而斜）
-	for k in 3:
-		var z := -bl * 0.42 + float(k) * bl * 0.16
-		s.cone(Vector3(0, top * 0.66, z), top * 0.045, top * 0.13, c.darkened(0.15), 4, 0.2, 0.8)
-	# 尾（三节渐细）
-	var tz := bl * 0.6
-	for k in 3:
-		var p0 := Vector3(0, top * 0.5 - top * 0.03 * float(k), tz + float(k) * top * 0.2)
-		s.beam(p0, p0 + Vector3(0, top * 0.03, top * 0.22), top * (0.055 - 0.014 * float(k)), top * (0.045 - 0.012 * float(k)), 5, c.darkened(0.12 + 0.06 * float(k)))
-	s.instance(body_root, "body")
-	# 四条腿（肩/髋枢轴，两段）
-	for i in 4:
-		var sx: float = -1.0 if i % 2 == 0 else 1.0
-		var sz: float = -bl * 0.34 if i < 2 else bl * 0.34
-		var leg := MeshKit.pivot(body_root, Vector3(sx * top * 0.2, top * 0.42, sz))
-		var ls := Soup.new()
-		ls.beam(Vector3(0, 0, 0), Vector3(sx * top * 0.05, -top * 0.2, sz * 0.02), top * 0.075, top * 0.055, 6, c.darkened(0.2))
-		ls.sphere(Vector3(sx * top * 0.05, -top * 0.21, sz * 0.02), top * 0.05, c.darkened(0.1), 7, 5)
-		ls.beam(Vector3(sx * top * 0.05, -top * 0.21, sz * 0.02), Vector3(sx * top * 0.03, -top * 0.4, sz * 0.02 + top * 0.03), top * 0.045, top * 0.035, 6, c.darkened(0.25))
-		ls.box(Vector3(sx * top * 0.03, -top * 0.42, sz * 0.02 + top * 0.05), Vector3(top * 0.13, top * 0.05, top * 0.16), Color("2a2420"), Basis.IDENTITY, 0.6, 0.9)
-		ls.instance(leg, "leg")
-		parts["leg%d" % i] = leg
 
-# ---------------------------------------------------------------- 史莱姆
+func push_part(key: String, xf: Transform3D, tint: Color = Color.WHITE, flash: float = 0.0) -> void:
+	if not batches.has(key):
+		return
+	var b: Dictionary = batches[key]
+	var idx: int = int(b["count"])
+	if idx >= int(b["cap"]):
+		return
+	var mm: MultiMesh = b["mm"]
+	mm.set_instance_transform(idx, xf)
+	mm.set_instance_custom_data(idx, Color(tint.r, tint.g, tint.b, flash))
+	b["count"] = idx + 1
 
-func _blob(c: Color, top: float) -> void:
-	var s := Soup.new()
-	# 主体：大球压扁 + 底部外扩的裙边 + 内部核
-	s.sphere(Vector3(0, top * 0.5, 0), top * 0.62, c, 14, 8, Vector3(1.0, 0.85, 1.0), 0.55, 1.0)
-	s.sphere(Vector3(0, top * 0.16, 0), top * 0.58, c.darkened(0.12), 12, 5, Vector3(1.0, 0.34, 1.0), 0.45, 0.75)
-	s.sphere(Vector3(0, top * 0.4, 0), top * 0.2, c.lightened(0.3), 8, 5, Vector3(1, 1.1, 1), 0.9, 1.0)
-	# 表面挂滴
-	for k in 4:
-		var a := TAU * float(k) / 4.0 + 0.3
-		s.sphere(Vector3(cos(a) * top * 0.52, top * 0.18, sin(a) * top * 0.52), top * 0.08, c.darkened(0.05), 6, 4, Vector3(1, 1.4, 1), 0.5, 0.8)
-	# 高光
-	s.sphere(Vector3(-top * 0.16, top * 0.68, -top * 0.3), top * 0.13, c.lightened(0.5), 7, 4, Vector3(1, 0.6, 1), 0.9, 1.0)
-	s.instance(body_root, "body")
-	for sx in [-1.0, 1.0]:
-		MeshKit.sphere(body_root, top * 0.085, Vector3(sx * top * 0.18, top * 0.62, top * 0.5), Color("101820"), 6, 1.2)
-		var p := MeshKit.pivot(body_root, Vector3(sx * top * 0.18, top * 0.62, top * 0.55))
-		_glow_dot(p, Vector3.ZERO, top * 0.06, Color("e8f8e0"))
-		parts["eye%d" % int(sx)] = p
 
-# ---------------------------------------------------------------- 虫
+# ============================================================================
+# Kit Mesh Construction (every body part, weapon, armor, prop, pickup, debris)
+# ============================================================================
 
-func _bug(c: Color, top: float) -> void:
-	var s := Soup.new()
-	# 腹节（三节由后到前抬升）
-	for k in 3:
-		var z := top * (0.16 + 0.22 * float(k))
-		s.sphere(Vector3(0, top * (0.4 + 0.03 * float(k)), z), top * (0.36 - 0.05 * float(k)), c.darkened(0.06 * float(k)), 11, 7, Vector3(1.05, 0.9, 1.0), 0.55, 1.0)
-	# 背甲分线
-	for k in 2:
-		s.box(Vector3(0, top * 0.68, top * (0.3 + 0.24 * float(k))), Vector3(top * 0.5, top * 0.03, top * 0.06), c.darkened(0.35))
-	# 头 + 复眼 + 螯
-	s.sphere(Vector3(0, top * 0.46, -top * 0.36), top * 0.26, c.lightened(0.08), 10, 6, Vector3(1.1, 0.95, 1.0), 0.6, 1.0)
-	for sx in [-1.0, 1.0]:
-		s.sphere(Vector3(sx * top * 0.13, top * 0.55, -top * 0.5), top * 0.075, Color("101018"), 6, 4)
-		_glow_dot(body_root, Vector3(sx * top * 0.13, top * 0.56, -top * 0.55), top * 0.045, Color("ff3a20"))
-		for k in 2:
-			s.beam(Vector3(sx * top * 0.06, top * 0.38, -top * 0.5), Vector3(sx * top * 0.16, top * 0.3 - 0.02 * float(k), -top * 0.72), top * 0.03, top * 0.012, 4, c.darkened(0.3))
-		# 触角
-		s.beam(Vector3(sx * top * 0.1, top * 0.6, -top * 0.42), Vector3(sx * top * 0.22, top * 0.82, -top * 0.62), top * 0.015, top * 0.008, 3, c.darkened(0.4))
-	if type == "brood" or type == "queen":
-		for k in 5:
-			var a := TAU * float(k) / 5.0
-			s.sphere(Vector3(cos(a) * top * 0.32, top * 0.6, sin(a) * top * 0.32), top * 0.15, c.lightened(0.2), 7, 5, Vector3(1, 1.15, 1), 0.7, 1.0)
-	s.instance(body_root, "body")
-	# 六条腿（两段）
-	for i in 6:
-		var sx: float = -1.0 if i % 2 == 0 else 1.0
-		var zz: float = (float(i / 2) - 1.0) * top * 0.3
-		var leg := MeshKit.pivot(body_root, Vector3(sx * top * 0.26, top * 0.36, zz))
-		var ls := Soup.new()
-		ls.beam(Vector3(0, 0, 0), Vector3(sx * top * 0.26, top * 0.06, zz * 0.2), top * 0.035, top * 0.028, 5, c.darkened(0.28))
-		ls.sphere(Vector3(sx * top * 0.26, top * 0.08, zz * 0.2), top * 0.028, c.darkened(0.15), 6, 4)
-		ls.beam(Vector3(sx * top * 0.26, top * 0.08, zz * 0.2), Vector3(sx * top * 0.4, -top * 0.14, zz * 0.5), top * 0.024, top * 0.012, 5, c.darkened(0.32))
-		ls.instance(leg, "leg")
-		parts["leg%d" % i] = leg
+func _build_all_kits() -> void:
+	var C := Soup.COL()
+	var rng := U.make_rng(5051)
+	Soup.set_rng(rng)
 
-# ---------------------------------------------------------------- 飞行
+	# --- 1. Humanoid / Skeleton / Footman / Boss parts ---
+	var sp := Soup.new()
+	sp.box(0.28, 0.34, 0.18, 0, 0.17, 0, C["bone"], {"l": TX.L_BONE})
+	for ry in [0.08, 0.16, 0.24]:
+		sp.box(0.32, 0.04, 0.21, 0, ry, 0, C["boneD"], {"l": TX.L_BONE})
+	_reg("skel_torso", sp, 220)
 
-func _bat(c: Color) -> void:
-	var s := Soup.new()
-	s.beam(Vector3(0, 0.14, 0.12), Vector3(0, 0.16, -0.12), 0.075, 0.06, 6, c, 0.0, 0.6, 1.0)
-	s.sphere(Vector3(0, 0.2, -0.16), 0.095, c.lightened(0.12), 8, 6, Vector3(1, 0.95, 1.1), 0.7, 1.0)
-	for sx in [-1.0, 1.0]:
-		s.cone(Vector3(sx * 0.04, 0.26, -0.16), 0.035, 0.12, c.darkened(0.15), 4, 0.3)
-	s.box(Vector3(0, 0.15, 0.18), Vector3(0.03, 0.02, 0.14), c.darkened(0.3))
-	s.instance(body_root, "body")
-	for sx in [-1.0, 1.0]:
-		_glow_dot(body_root, Vector3(sx * 0.042, 0.225, -0.235), 0.022, Color("ff3a20"))
-	# 翼（肩枢轴，骨 + 膜）
-	for sx in [-1.0, 1.0]:
-		var w := MeshKit.pivot(body_root, Vector3(sx * 0.055, 0.19, 0))
-		var ws := Soup.new()
-		var tip := Vector3(sx * 0.42, 0.05, 0.06)
-		var mid := Vector3(sx * 0.22, 0.12, -0.06)
-		ws.beam(Vector3.ZERO, tip, 0.028, 0.01, 4, c.darkened(0.15))
-		ws.beam(Vector3.ZERO, mid, 0.024, 0.008, 4, c.darkened(0.2))
-		ws.quad(Vector3.ZERO, Vector3(sx * 0.05, 0.0, 0.1), tip, mid, Vector3.UP, c.darkened(0.05))
-		ws.quad(Vector3.ZERO, mid, tip, Vector3(sx * 0.12, 0.0, 0.14), Vector3.UP, c.darkened(0.12))
-		ws.instance(w, "wing")
-		parts["wingL" if sx < 0.0 else "wingR"] = w
+	sp = Soup.new()
+	sp.sph(0.14, 0, 0.12, 0, C["bone"], {"l": TX.L_BONE, "w": 8, "h": 6, "sc": Vector3(0.92, 1.05, 1.05)})
+	sp.box(0.11, 0.07, 0.09, 0, 0.02, 0.08, C["boneD"], {"l": TX.L_BONE})
+	_reg("skel_head", sp, 220)
 
-func _ghost(c: Color) -> void:
-	var s := Soup.new()
-	# 长袍：八棱锥体 + 下摆起伏
-	s.cyl(Vector3(0, 0.75, 0), 0.2, 0.34, 1.1, c, 8, 0.0, 0.45, 1.0)
-	for k in 8:
-		var a := TAU * float(k) / 8.0
-		var len_v := 0.12 + 0.09 * sin(float(k) * 1.7)
-		s.cone(Vector3(cos(a) * 0.28, 0.22 - len_v, sin(a) * 0.28), 0.075, len_v + 0.1, c.darkened(0.08), 4, 0.0, 0.4)
-	parts["body"] = s.instance(body_root, "ghost")
-	var h := Soup.new()
-	h.sphere(Vector3(0, 1.18, 0), 0.19, c.lightened(0.18), 9, 6, Vector3(1, 1.05, 1.05), 0.85, 1.0)
-	h.cone(Vector3(0, 1.28, 0), 0.22, 0.34, c.darkened(0.4), 8, 0.0, 0.75)
-	h.box(Vector3(0, 1.12, 0.16), Vector3(0.14, 0.1, 0.08), Color("181420"))
-	# 袖
-	for sx in [-1.0, 1.0]:
-		h.beam(Vector3(sx * 0.19, 1.12, 0), Vector3(sx * 0.3, 0.74, 0.08), 0.075, 0.11, 6, c.darkened(0.05))
-	h.instance(body_root, "head")
-	for sx in [-1.0, 1.0]:
-		_glow_dot(body_root, Vector3(sx * 0.075, 1.2, 0.16), 0.04, Color("80ffe0"))
+	sp = Soup.new()
+	sp.cyl(0.045, 0.36, 0, -0.18, 0, C["bone"], {"n": 6, "l": TX.L_BONE})
+	_reg("skel_limb", sp, 700)
 
-func _wisp(c: Color) -> void:
-	var s := Soup.new()
-	s.sphere(Vector3(0, 0.22, 0), 0.17, c, 10, 7, Vector3(1, 1, 1), 0.9, 1.0)
-	s.sphere(Vector3(0, 0.22, 0), 0.1, Color("ffffff"), 8, 6, Vector3(1, 1, 1), 1.0, 1.0)
-	# 拖尾光丝
-	for k in 3:
-		var a := TAU * float(k) / 3.0
-		s.beam(Vector3(cos(a) * 0.1, 0.18, sin(a) * 0.1), Vector3(cos(a + 1.2) * 0.08, -0.2, sin(a + 1.2) * 0.08), 0.03, 0.004, 4, c.darkened(0.1), 0.0, 0.9, 1.0)
-	parts["blob"] = s.instance(body_root, "wisp")
-	for k in 3:
-		var a := TAU * float(k) / 3.0
-		_glow_dot(body_root, Vector3(cos(a) * 0.24, 0.22 + sin(a) * 0.1, sin(a) * 0.24), 0.045, c.lightened(0.2))
+	# Armored Footman / Archer / Brute body
+	sp = Soup.new()
+	sp.box(0.34, 0.40, 0.22, 0, 0.20, 0, C["ironL"], {"l": TX.L_METAL, "rough": 0.46})
+	sp.box(0.36, 0.12, 0.24, 0, 0.06, 0, C["clothR"], {"l": TX.L_CLOTH})
+	_reg("foot_torso", sp, 160)
 
-# ---------------------------------------------------------------- 蟾蜍
+	sp = Soup.new()
+	sp.sph(0.14, 0, 0.12, 0, C["skin"], {"w": 8, "h": 6})
+	sp.dome(0.16, 0.15, 0.16, 0, 0.14, 0, C["steel"], {"w": 8, "h": 4, "l": TX.L_METAL, "rough": 0.36})
+	_reg("foot_head", sp, 160)
 
-func _toad(c: Color) -> void:
-	var s := Soup.new()
-	s.sphere(Vector3(0, 0.3, 0), 0.44, c, 12, 7, Vector3(1.15, 0.72, 1.25), 0.5, 1.0)
-	s.sphere(Vector3(0, 0.42, -0.06), 0.3, c.lightened(0.06), 10, 6, Vector3(1.05, 0.85, 1.0), 0.6, 1.0)
-	# 头部 + 眼包 + 嘴
-	s.sphere(Vector3(0, 0.36, -0.42), 0.26, c.darkened(0.02), 10, 6, Vector3(1.15, 0.8, 1.0), 0.6, 1.0)
-	s.box(Vector3(0, 0.28, -0.6), Vector3(0.3, 0.035, 0.1), c.darkened(0.4))
-	for sx in [-1.0, 1.0]:
-		s.sphere(Vector3(sx * 0.17, 0.5, -0.44), 0.12, c.lightened(0.1), 9, 6)
-		_glow_dot(body_root, Vector3(sx * 0.17, 0.54, -0.52), 0.05, Color("101820"))
-	# 背疣
-	for k in 7:
-		var a := TAU * float(k) / 7.0
-		s.sphere(Vector3(cos(a) * 0.28, 0.48, sin(a) * 0.24 - 0.05), 0.03, c.darkened(0.25), 5, 3)
-	s.instance(body_root, "body")
-	# 前后腿
-	for i in 4:
-		var sx: float = -1.0 if i % 2 == 0 else 1.0
-		var front := i < 2
-		var leg := MeshKit.pivot(body_root, Vector3(sx * 0.3, 0.24, -0.28 if front else 0.3))
-		var ls := Soup.new()
-		if front:
-			ls.beam(Vector3(0, 0, 0), Vector3(sx * 0.1, -0.16, 0.06), 0.05, 0.04, 5, c.darkened(0.15))
-			ls.box(Vector3(sx * 0.14, -0.2, 0.12), Vector3(0.12, 0.03, 0.16), c.darkened(0.25))
+	sp = Soup.new()
+	sp.cyl(0.06, 0.36, 0, -0.18, 0, C["leather"], {"n": 6, "l": TX.L_CLOTH})
+	_reg("foot_limb", sp, 500)
+
+	# Heavy Ogre / Colossus / Golem torso & limbs
+	sp = Soup.new()
+	sp.sph(0.46, 0, 0.38, 0, C["ogre"], {"w": 9, "h": 7, "sc": Vector3(1.12, 1.05, 0.92), "l": TX.L_PLAIN})
+	sp.box(0.72, 0.20, 0.52, 0, 0.08, 0, C["leather"], {"l": TX.L_CLOTH})
+	_reg("ogre_torso", sp, 48)
+
+	sp = Soup.new()
+	sp.sph(0.24, 0, 0.18, 0, C["ogreD"], {"w": 8, "h": 6, "sc": Vector3(1.0, 0.92, 1.08)})
+	sp.box(0.22, 0.08, 0.14, 0, 0.06, 0.16, C["bone"], {"l": TX.L_BONE})
+	_reg("ogre_head", sp, 48)
+
+	sp = Soup.new()
+	sp.cyl(0.13, 0.56, 0, -0.26, 0, C["ogreD"], {"n": 7, "rt": 0.78})
+	_reg("ogre_limb", sp, 160)
+
+	# Stone Golem / Magma Colossus blocky body
+	sp = Soup.new()
+	sp.rock(0.48, 0, 0.38, 0, C["stone"], {"sq": 0.95})
+	sp.box(0.24, 0.24, 0.14, 0, 0.42, 0.34, C["ember"], {"emis": 1.6})
+	_reg("golem_torso", sp, 64)
+
+	sp = Soup.new()
+	sp.rock(0.24, 0, 0.18, 0, C["stoneD"], {"sq": 0.92})
+	_reg("golem_head", sp, 64)
+
+	sp = Soup.new()
+	sp.box(0.22, 0.54, 0.22, 0, -0.26, 0, C["stoneD"], {"l": TX.L_ROCK})
+	_reg("golem_limb", sp, 220)
+
+	# --- 2. Creature Kits (Rat, Slime, Bat, Gargoyle, Spider, Wolf, Wraith, Wisp, Toad) ---
+	# Rat / Scarab body + head + tail
+	sp = Soup.new()
+	sp.sph(0.20, 0, 0.14, 0, C["rat"], {"w": 8, "h": 6, "sc": Vector3(0.85, 0.72, 1.45)})
+	sp.cone(0.11, 0.22, 0, 0.13, 0.30, C["ratD"], {"n": 6, "r": Vector3(PI * 0.5, 0, 0)})
+	sp.sph(0.055, -0.09, 0.22, 0.16, C["ratD"], {"w": 5, "h": 4})
+	sp.sph(0.055, 0.09, 0.22, 0.16, C["ratD"], {"w": 5, "h": 4})
+	_reg("rat_body", sp, 160)
+
+	sp = Soup.new()
+	sp.seg(Vector3(0, 0, 0), Vector3(0, 0.05, -0.42), 0.032, 0.01, C["skin"], {"n": 4})
+	_reg("rat_tail", sp, 160)
+
+	# Slime dome blob
+	sp = Soup.new()
+	sp.dome(0.36, 0.38, 0.36, 0, 0.0, 0, C["slime"], {"w": 10, "h": 6, "l": TX.L_PLAIN, "rough": 0.22})
+	sp.sph(0.14, 0.08, 0.16, 0.06, C["slimeD"], {"w": 6, "h": 4, "rough": 0.18})
+	_reg("slime_body", sp, 140)
+
+	# Bat / Gargoyle body + hinged wing
+	sp = Soup.new()
+	sp.sph(0.16, 0, 0.0, 0, C["bat"], {"w": 7, "h": 5, "sc": Vector3(0.85, 0.85, 1.25)})
+	sp.cone(0.05, 0.14, -0.08, 0.14, 0.06, C["bat"], {"n": 4})
+	sp.cone(0.05, 0.14, 0.08, 0.14, 0.06, C["bat"], {"n": 4})
+	_reg("bat_body", sp, 140)
+
+	sp = Soup.new()
+	sp.tri(Vector3(0, 0, 0.08), Vector3(0.55, 0.08, 0.16), Vector3(0.42, -0.04, -0.22), C["bat"], TX.L_CLOTH, 0.85)
+	sp.tri(Vector3(0, 0, 0.08), Vector3(0.42, -0.04, -0.22), Vector3(0, 0, -0.14), C["bat"], TX.L_CLOTH, 0.85)
+	sp.tri(Vector3(0, 0, 0.08), Vector3(0.42, -0.04, -0.22), Vector3(0.55, 0.08, 0.16), C["bat"], TX.L_CLOTH, 0.85)
+	sp.tri(Vector3(0, 0, 0.08), Vector3(0, 0, -0.14), Vector3(0.42, -0.04, -0.22), C["bat"], TX.L_CLOTH, 0.85)
+	_reg("bat_wing", sp, 280)
+
+	# Spider / Broodmother / Spider Queen abdomen + thorax + articulated leg
+	sp = Soup.new()
+	sp.sph(0.28, 0, 0.24, -0.22, C["basalt"], {"w": 8, "h": 6, "sc": Vector3(0.95, 0.88, 1.22)})
+	sp.sph(0.16, 0, 0.20, 0.16, C["basaltL"], {"w": 7, "h": 5})
+	sp.box(0.10, 0.06, 0.12, -0.06, 0.16, 0.30, C["clothR"])
+	sp.box(0.10, 0.06, 0.12, 0.06, 0.16, 0.30, C["clothR"])
+	_reg("spider_body", sp, 120)
+
+	sp = Soup.new()
+	sp.seg(Vector3(0, 0, 0), Vector3(0.26, 0.14, 0), 0.036, 0.028, C["basalt"], {"n": 4})
+	sp.seg(Vector3(0.26, 0.14, 0), Vector3(0.46, -0.22, 0), 0.028, 0.012, C["basaltL"], {"n": 4})
+	_reg("spider_leg", sp, 700)
+
+	# Wolf body + head + tail
+	sp = Soup.new()
+	sp.box(0.28, 0.26, 0.62, 0, 0.34, 0, C["rat"], {"l": TX.L_CLOTH})
+	sp.box(0.22, 0.20, 0.28, 0, 0.44, 0.36, C["ratD"], {"l": TX.L_CLOTH})
+	sp.box(0.12, 0.10, 0.18, 0, 0.39, 0.54, C["ratD"])
+	sp.cone(0.05, 0.12, -0.08, 0.58, 0.32, C["ratD"], {"n": 4})
+	sp.cone(0.05, 0.12, 0.08, 0.58, 0.32, C["ratD"], {"n": 4})
+	_reg("wolf_body", sp, 120)
+
+	# Wraith cloaked phantom
+	sp = Soup.new()
+	sp.cone(0.32, 1.05, 0, 0.56, 0, C["clothD"], {"n": 8, "l": TX.L_CLOTH, "sway": 0.45})
+	sp.sph(0.16, 0, 1.02, 0.04, C["black"], {"w": 7, "h": 5})
+	sp.dome(0.20, 0.22, 0.22, 0, 1.04, 0.0, C["clothD"], {"w": 8, "h": 5, "l": TX.L_CLOTH})
+	_reg("wraith_body", sp, 100)
+
+	# Glowing Wisp orb
+	sp = Soup.new()
+	sp.ico(0.22, 0, 0, 0, C["crystal"], {"d": 1, "emis": 2.4})
+	_reg("wisp_body", sp, 100, false)
+
+	# Mire Toad body
+	sp = Soup.new()
+	sp.sph(0.30, 0, 0.22, 0, C["ogre"], {"w": 8, "h": 6, "sc": Vector3(1.12, 0.78, 1.22)})
+	sp.sph(0.16, 0, 0.18, 0.22, C["ogreD"], {"w": 7, "h": 5, "sc": Vector3(1.2, 0.7, 0.9)})
+	sp.sph(0.07, -0.14, 0.34, 0.18, C["gold"], {"w": 6, "h": 4, "emis": 0.5})
+	sp.sph(0.07, 0.14, 0.34, 0.18, C["gold"], {"w": 6, "h": 4, "emis": 0.5})
+	_reg("toad_body", sp, 100)
+
+	# --- 3. Weapons, Shields, Helmets, Robes, Crowns, Kegs, Drums ---
+	sp = Soup.new()
+	sp.box(0.05, 0.58, 0.02, 0, 0.32, 0, C["steel"], {"l": TX.L_METAL, "rough": 0.3})
+	sp.box(0.20, 0.04, 0.04, 0, 0.04, 0, C["brass"], {"l": TX.L_METAL, "rough": 0.38})
+	sp.cyl(0.025, 0.14, 0, -0.05, 0, C["woodD"], {"n": 5})
+	_reg("item_sword", sp, 220)
+
+	sp = Soup.new()
+	sp.cyl(0.22, 0.05, 0, 0, 0, C["wood"], {"n": 8, "r": Vector3(PI * 0.5, 0, 0), "l": TX.L_WOOD})
+	sp.torus(0.22, 0, 0, 0, C["iron"], {"n": 8, "t": 0.14, "l": TX.L_METAL})
+	sp.sph(0.06, 0, 0, 0.04, C["brass"], {"w": 6, "h": 4, "l": TX.L_METAL})
+	_reg("item_shield", sp, 180)
+
+	sp = Soup.new()
+	sp.seg(Vector3(0, -0.28, 0), Vector3(0, 0, 0.14), 0.022, 0.025, C["woodL"], {"n": 4})
+	sp.seg(Vector3(0, 0, 0.14), Vector3(0, 0.28, 0), 0.025, 0.022, C["woodL"], {"n": 4})
+	_reg("item_bow", sp, 120)
+
+	sp = Soup.new()
+	sp.cyl(0.035, 1.15, 0, 0.45, 0, C["woodD"], {"n": 6, "l": TX.L_WOOD})
+	sp.oct(0.11, 0.18, 0.11, 0, 1.06, 0, C["crystal"], {"emis": 2.1})
+	_reg("item_staff", sp, 80)
+
+	sp = Soup.new()
+	sp.cyl(0.05, 0.85, 0, 0.42, 0, C["wood"], {"n": 6, "rt": 2.2, "l": TX.L_WOOD})
+	_reg("item_club", sp, 80)
+
+	sp = Soup.new()
+	sp.cyl(0.20, 0.34, 0, 0.18, 0, C["woodD"], {"n": 8, "l": TX.L_WOOD})
+	sp.cyl(0.21, 0.04, 0, 0.08, 0, C["iron"], {"n": 8, "l": TX.L_METAL})
+	sp.cyl(0.21, 0.04, 0, 0.28, 0, C["iron"], {"n": 8, "l": TX.L_METAL})
+	_reg("item_keg", sp, 80)
+
+	sp = Soup.new()
+	sp.cyl(0.18, 0.22, 0, 0.0, 0, C["wood"], {"n": 8, "l": TX.L_WOOD})
+	sp.cyl(0.17, 0.03, 0, 0.12, 0, C["bone"], {"n": 8})
+	_reg("item_drum", sp, 48)
+
+	sp = Soup.new()
+	sp.torus(0.14, 0, 0.05, 0, C["gold"], {"n": 8, "t": 0.22, "r": Vector3(PI * 0.5, 0, 0), "l": TX.L_METAL, "rough": 0.3})
+	for i in 5:
+		var a := float(i) * TAU / 5.0
+		sp.cone(0.03, 0.11, cos(a) * 0.14, 0.11, sin(a) * 0.14, C["gold"], {"n": 4, "l": TX.L_METAL})
+	_reg("item_crown", sp, 32)
+
+	sp = Soup.new()
+	sp.cyl(0.24, 0.68, 0, 0.34, 0, C["clothR"], {"n": 8, "rt": 0.68, "l": TX.L_CLOTH})
+	_reg("item_robe", sp, 100)
+
+	# --- 4. Projectiles, Gold Coins, Shatter Debris, Pad Marker ---
+	sp = Soup.new()
+	sp.cyl(0.018, 0.68, 0, 0, 0, C["woodL"], {"n": 5, "r": Vector3(PI * 0.5, 0, 0)})
+	sp.cone(0.045, 0.14, 0, 0, 0.36, C["steel"], {"n": 4, "r": Vector3(PI * 0.5, 0, 0), "l": TX.L_METAL})
+	sp.box(0.08, 0.015, 0.14, 0, 0, -0.28, C["ember"], {"emis": 1.4})
+	_reg("proj_arrow", sp, 180, false)
+
+	sp = Soup.new()
+	sp.sph(0.18, 0, 0, 0, C["iron"], {"w": 8, "h": 6, "l": TX.L_METAL, "rough": 0.36})
+	_reg("proj_shell", sp, 80)
+
+	sp = Soup.new()
+	sp.cyl(0.14, 0.045, 0, 0, 0, C["gold"], {"n": 8, "r": Vector3(PI * 0.5, 0, 0), "l": TX.L_METAL, "rough": 0.25, "emis": 0.45})
+	_reg("coin", sp, 160, false)
+
+	sp = Soup.new()
+	sp.rock(0.16, 0, 0, 0, C["stone"], {"sq": 0.8})
+	_reg("debris_rock", sp, 260)
+
+	sp = Soup.new()
+	sp.box(0.08, 0.04, 0.34, 0, 0, 0, C["bone"], {"l": TX.L_BONE})
+	_reg("debris_bone", sp, 260)
+
+	sp = Soup.new()
+	sp.box(0.12, 0.04, 0.46, 0, 0, 0, C["wood"], {"l": TX.L_WOOD})
+	_reg("debris_plank", sp, 180)
+
+	# Gentle floating compass crystal over empty build pads
+	sp = Soup.new()
+	sp.oct(0.18, 0.36, 0.18, 0, 0.0, 0, C["gold"], {"l": TX.L_METAL, "rough": 0.28, "emis": 1.1})
+	_reg("pad_marker", sp, 16, false)
+
+
+# ============================================================================
+# Skeletal Rig Pose Emitters (All 26 Creatures + Archers + Footmen)
+# ============================================================================
+
+func emit_unit(u: Dictionary, t: float, fx_node: Node) -> void:
+	var kind: String = String(u["kind"])
+	var pos: Vector3 = u["pos"]
+	var yaw: float = float(u["yaw"])
+	var s: float = float(u["scale"])
+	var ph: float = float(u["phase"])
+	var flash: float = float(u["flash"])
+	var tint: Color = u["tint"]
+	var atk: float = float(u.get("atk_t", 0.0))
+	var eye_col: Color = u.get("eye_col", Color(1.0, 0.35, 0.12))
+
+	var b_root := Basis(Vector3.UP, yaw)
+	var sw := sin(ph)
+	var bob := absf(cos(ph)) * 0.07 * s
+	var base := Transform3D(b_root.scaled(Vector3.ONE * s), pos + Vector3(0.0, bob, 0.0))
+
+	match kind:
+		"rat", "scarab":
+			var sc_tint := Color(0.95, 0.72, 0.22) if kind == "scarab" else tint
+			push_part("rat_body", base * Transform3D(Basis.from_euler(Vector3(sw * 0.08, 0, sw * 0.1)), Vector3.ZERO), sc_tint, flash)
+			push_part("rat_tail", base * Transform3D(Basis.from_euler(Vector3(0, sw * 0.35, 0)), Vector3(0, 0.12, -0.22)), sc_tint, flash)
+			_emit_eyes(fx_node, base, Vector3(0, 0.16, 0.24), 0.07, 0.14 * s, eye_col)
+
+		"slime", "slimelet":
+			var sq := 1.0 + sin(ph * 1.4) * 0.18
+			var slime_xf := Transform3D(b_root.scaled(Vector3(s * sq, s / sq, s * sq)), pos)
+			push_part("slime_body", slime_xf, tint, flash)
+			_emit_eyes(fx_node, slime_xf, Vector3(0, 0.22, 0.28), 0.11, 0.16 * s, eye_col)
+
+		"bat", "gargoyle":
+			var flap := sin(ph * 2.2) * 0.82
+			var hov := pos + Vector3(0, sin(ph * 1.1) * 0.18, 0)
+			var b_xf := Transform3D(b_root.scaled(Vector3.ONE * s), hov)
+			var bt := Color(0.62, 0.64, 0.72) if kind == "gargoyle" else tint
+			push_part("bat_body", b_xf, bt, flash)
+			push_part("bat_wing", b_xf * Transform3D(Basis(Vector3.FORWARD, flap), Vector3(0.08, 0.02, 0)), bt, flash)
+			push_part("bat_wing", b_xf * Transform3D(Basis(Vector3.UP, PI) * Basis(Vector3.FORWARD, flap), Vector3(-0.08, 0.02, 0)), bt, flash)
+			_emit_eyes(fx_node, b_xf, Vector3(0, 0.04, 0.16), 0.06, 0.14 * s, eye_col)
+
+		"spider", "brood", "queen":
+			var st := Color(0.58, 0.36, 0.68) if kind == "queen" else (Color(0.55, 0.48, 0.42) if kind == "brood" else tint)
+			push_part("spider_body", base, st, flash)
+			for i in 4:
+				var zo := -0.18 + float(i) * 0.12
+				var leg_sw := sin(ph + float(i) * 1.4) * 0.32
+				push_part("spider_leg", base * Transform3D(Basis.from_euler(Vector3(0, -0.25 + float(i) * 0.18 + leg_sw, 0)), Vector3(0.14, 0.20, zo)), st, flash)
+				push_part("spider_leg", base * Transform3D(Basis.from_euler(Vector3(0, PI + 0.25 - float(i) * 0.18 - leg_sw, 0)), Vector3(-0.14, 0.20, zo)), st, flash)
+			_emit_eyes(fx_node, base, Vector3(0, 0.22, 0.30), 0.07, 0.18 * s, Color(1.0, 0.22, 0.14))
+
+		"wolf":
+			var wf := Transform3D(b_root.scaled(Vector3.ONE * s), pos + Vector3(0, absf(sw) * 0.10 * s, 0))
+			push_part("wolf_body", wf, tint, flash)
+			for sx in [-0.12, 0.12]:
+				push_part("foot_limb", wf * Transform3D(Basis(Vector3.RIGHT, sw * 0.65), Vector3(sx, 0.28, 0.22)), tint, flash)
+				push_part("foot_limb", wf * Transform3D(Basis(Vector3.RIGHT, -sw * 0.65), Vector3(sx, 0.28, -0.22)), tint, flash)
+			_emit_eyes(fx_node, wf, Vector3(0, 0.45, 0.50), 0.07, 0.15 * s, Color(0.95, 0.78, 0.25))
+
+		"wraith":
+			var wr_p := pos + Vector3(0, 0.22 + sin(t * 3.0 + ph) * 0.14, 0)
+			var w_xf := Transform3D(b_root.scaled(Vector3.ONE * s), wr_p)
+			var phase_k := 0.55 if bool(u.get("phasing", false)) else 1.0
+			push_part("wraith_body", w_xf, tint * Color(0.75, 0.95, 1.15) * phase_k, flash)
+			_emit_eyes(fx_node, w_xf, Vector3(0, 1.02, 0.16), 0.06, 0.22 * s, Color(0.45, 0.92, 1.0))
+
+		"wisp":
+			var wp := pos + Vector3(0, sin(t * 4.2 + ph) * 0.24, 0)
+			var w_xf := Transform3D(b_root.rotated(Vector3.UP, t * 2.5).scaled(Vector3.ONE * s), wp)
+			push_part("wisp_body", w_xf, tint, flash)
+			if fx_node != null:
+				fx_node.push_add(wp.x, wp.y, wp.z, 1.3 * s, 1.3 * s, tint, 0.65, 2, ph)
+
+		"toad":
+			var hop := maxf(0.0, sin(ph)) * 0.42 * s
+			var t_xf := Transform3D(b_root.scaled(Vector3.ONE * s), pos + Vector3(0, hop, 0))
+			push_part("toad_body", t_xf, tint, flash)
+
+		"ogre", "colossus":
+			var is_col := (kind == "colossus")
+			var tk := "golem_torso" if is_col else "ogre_torso"
+			var hk := "golem_head" if is_col else "ogre_head"
+			var lk := "golem_limb" if is_col else "ogre_limb"
+			var ot := Color(1.35, 0.52, 0.30) if is_col else tint
+			var arm_atk := -sin(atk * PI) * 1.45 if atk > 0.0 else sw * 0.45
+			push_part(tk, base * Transform3D(Basis.IDENTITY, Vector3(0, 0.48, 0)), ot, flash)
+			push_part(hk, base * Transform3D(Basis.IDENTITY, Vector3(0, 1.08, 0.08)), ot, flash)
+			push_part(lk, base * Transform3D(Basis(Vector3.RIGHT, sw * 0.5), Vector3(-0.24, 0.52, 0)), ot, flash)
+			push_part(lk, base * Transform3D(Basis(Vector3.RIGHT, -sw * 0.5), Vector3(0.24, 0.52, 0)), ot, flash)
+			var r_arm := base * Transform3D(Basis(Vector3.RIGHT, arm_atk), Vector3(0.46, 0.94, 0))
+			push_part(lk, r_arm, ot, flash)
+			push_part(lk, base * Transform3D(Basis(Vector3.RIGHT, -sw * 0.45), Vector3(-0.46, 0.94, 0)), ot, flash)
+			push_part("item_club", r_arm * Transform3D(Basis(Vector3.RIGHT, 1.25), Vector3(0, -0.46, 0.14)), ot, flash)
+			_emit_eyes(fx_node, base, Vector3(0, 1.24, 0.28), 0.10, 0.28 * s, Color(1.0, 0.55, 0.12) if is_col else Color(1.0, 0.28, 0.15))
+
+		"golem":
+			push_part("golem_torso", base * Transform3D(Basis.IDENTITY, Vector3(0, 0.45, 0)), tint, flash)
+			push_part("golem_head", base * Transform3D(Basis.IDENTITY, Vector3(0, 1.02, 0.04)), tint, flash)
+			push_part("golem_limb", base * Transform3D(Basis(Vector3.RIGHT, sw * 0.42), Vector3(-0.24, 0.50, 0)), tint, flash)
+			push_part("golem_limb", base * Transform3D(Basis(Vector3.RIGHT, -sw * 0.42), Vector3(0.24, 0.50, 0)), tint, flash)
+			push_part("golem_limb", base * Transform3D(Basis(Vector3.RIGHT, -sw * 0.35), Vector3(-0.44, 0.88, 0)), tint, flash)
+			push_part("golem_limb", base * Transform3D(Basis(Vector3.RIGHT, sw * 0.35), Vector3(0.44, 0.88, 0)), tint, flash)
+			_emit_eyes(fx_node, base, Vector3(0, 1.18, 0.22), 0.09, 0.24 * s, Color(1.0, 0.55, 0.16))
+
+		_: # All Humanoid Skeletons, Guards, Brutes, Necros, Shamans, Drummers, Bombers, Mummies, Bosses, Footmen!
+			_emit_humanoid(kind, base, s, sw, atk, tint, flash, eye_col, fx_node)
+
+
+func _emit_humanoid(kind: String, base: Transform3D, s: float, sw: float, atk: float, tint: Color, flash: float, eye_col: Color, fx_node: Node) -> void:
+	var armored := (kind == "footman" or kind == "guard" or kind == "brute" or kind == "archer" or kind == "tower_archer")
+	var tk := "foot_torso" if armored else "skel_torso"
+	var hk := "foot_head" if armored else "skel_head"
+	var lk := "foot_limb" if armored else "skel_limb"
+
+	var t_use := tint
+	if kind == "mummy" or kind == "king":
+		t_use = tint * Color(0.92, 0.86, 0.68)
+	elif kind == "jotun":
+		t_use = tint * Color(0.72, 0.94, 1.25)
+	elif kind == "necro":
+		t_use = tint * Color(0.78, 0.58, 0.95)
+	elif kind == "shaman":
+		t_use = tint * Color(0.68, 0.95, 0.68)
+
+	var leg_a := sw * 0.58
+	var arm_r_a := -sin(atk * PI) * 1.55 if atk > 0.0 else -sw * 0.45
+	var arm_l_a := sw * 0.45
+	if kind == "bomber":
+		arm_r_a = -2.4
+		arm_l_a = -2.4
+	elif kind == "tower_archer":
+		leg_a = 0.0
+		arm_l_a = -1.45
+		arm_r_a = -1.35 - atk * 0.35
+
+	push_part(tk, base * Transform3D(Basis.IDENTITY, Vector3(0, 0.36, 0)), t_use, flash)
+	push_part(hk, base * Transform3D(Basis.IDENTITY, Vector3(0, 0.72, 0)), t_use, flash)
+	push_part(lk, base * Transform3D(Basis(Vector3.RIGHT, leg_a), Vector3(-0.10, 0.38, 0)), t_use, flash)
+	push_part(lk, base * Transform3D(Basis(Vector3.RIGHT, -leg_a), Vector3(0.10, 0.38, 0)), t_use, flash)
+
+	var r_arm := base * Transform3D(Basis(Vector3.RIGHT, arm_r_a), Vector3(0.21, 0.68, 0))
+	var l_arm := base * Transform3D(Basis(Vector3.RIGHT, arm_l_a), Vector3(-0.21, 0.68, 0))
+	push_part(lk, r_arm, t_use, flash)
+	push_part(lk, l_arm, t_use, flash)
+
+	# Class gear & silhouette landmarks
+	if kind == "necro" or kind == "shaman":
+		push_part("item_robe", base * Transform3D(Basis.IDENTITY, Vector3(0, 0.04, 0)), t_use, flash)
+		push_part("item_staff", r_arm * Transform3D(Basis.IDENTITY, Vector3(0, -0.28, 0.10)), t_use, flash)
+	elif kind == "bomber":
+		push_part("item_keg", base * Transform3D(Basis.IDENTITY, Vector3(0, 0.96, 0.08)), Color.WHITE, flash)
+		if fx_node != null:
+			var fp := base * Vector3(0, 1.32, 0.08)
+			fx_node.push_add(fp.x, fp.y, fp.z, 0.35 * s, 0.35 * s, Color(1.0, 0.65, 0.20), 1.3, 0, sw)
+	elif kind == "drummer":
+		push_part("item_drum", base * Transform3D(Basis.IDENTITY, Vector3(0, 0.52, 0.24)), Color.WHITE, flash)
+	elif kind == "archer" or kind == "tower_archer":
+		push_part("item_bow", l_arm * Transform3D(Basis.IDENTITY, Vector3(0, -0.22, 0.14)), Color.WHITE, flash)
+	elif kind == "brute" or kind == "giant" or kind == "jotun":
+		push_part("item_club", r_arm * Transform3D(Basis(Vector3.RIGHT, 1.25), Vector3(0, -0.32, 0.08)), t_use, flash)
+		if kind == "jotun" or kind == "giant":
+			push_part("item_crown", base * Transform3D(Basis.IDENTITY, Vector3(0, 0.94, 0)), t_use, flash)
+	elif kind == "king":
+		push_part("item_robe", base * Transform3D(Basis.IDENTITY, Vector3(0, 0.04, 0)), Color(0.88, 0.72, 0.32), flash)
+		push_part("item_crown", base * Transform3D(Basis.IDENTITY, Vector3(0, 0.94, 0)), Color.WHITE, flash)
+		push_part("item_sword", r_arm * Transform3D(Basis(Vector3.RIGHT, 1.2), Vector3(0, -0.32, 0.08)), Color(1.1, 0.92, 0.45), flash)
+	else:
+		# Footman, Skeleton, Guard, Mummy
+		push_part("item_sword", r_arm * Transform3D(Basis(Vector3.RIGHT, 1.2), Vector3(0, -0.30, 0.08)), Color.WHITE, flash)
+		if kind == "footman" or kind == "guard":
+			push_part("item_shield", l_arm * Transform3D(Basis.IDENTITY, Vector3(-0.08, -0.24, 0.12)), Color.WHITE, flash)
+
+	if kind != "footman" and kind != "tower_archer":
+		_emit_eyes(fx_node, base, Vector3(0, 0.84, 0.13), 0.055, 0.16 * s, eye_col)
+
+
+func _emit_eyes(fx_node: Node, xf: Transform3D, local_center: Vector3, sep: float, sz: float, col: Color) -> void:
+	if fx_node == null:
+		return
+	var el := xf * (local_center + Vector3(-sep, 0, 0))
+	var er := xf * (local_center + Vector3(sep, 0, 0))
+	fx_node.push_add(el.x, el.y, el.z, sz, sz, col, 1.4, 0)
+	fx_node.push_add(er.x, er.y, er.z, sz, sz, col, 1.4, 0)
+
+
+# ============================================================================
+# Shatter Debris & Bouncing Coins
+# ============================================================================
+
+func spawn_shatter(pos: Vector3, kind: String, count: int, col: Color) -> void:
+	var key := "debris_bone"
+	if kind == "golem" or kind == "colossus" or kind == "gargoyle" or kind == "tower":
+		key = "debris_rock"
+	elif kind == "wood":
+		key = "debris_plank"
+	for _i in count:
+		if debris.size() >= 220:
+			debris.pop_front()
+		var a := randf() * TAU
+		var spd := 1.8 + randf() * 3.8
+		debris.append({
+			"key": key,
+			"pos": pos + Vector3((randf() - 0.5) * 0.4, 0.35 + randf() * 0.45, (randf() - 0.5) * 0.4),
+			"vel": Vector3(cos(a) * spd, 2.8 + randf() * 3.8, sin(a) * spd),
+			"rot": Vector3(randf() * TAU, randf() * TAU, randf() * TAU),
+			"vrot": Vector3((randf() - 0.5) * 11.0, (randf() - 0.5) * 11.0, (randf() - 0.5) * 11.0),
+			"scale": 0.65 + randf() * 0.75,
+			"col": col,
+			"age": 0.0,
+			"life": 1.4 + randf() * 1.1,
+		})
+
+
+func spawn_coins(pos: Vector3, n: int) -> void:
+	for _i in mini(n, 8):
+		if coins.size() >= 120:
+			coins.pop_front()
+		var a := randf() * TAU
+		var spd := 1.2 + randf() * 2.2
+		coins.append({
+			"pos": pos + Vector3(0, 0.45, 0),
+			"vel": Vector3(cos(a) * spd, 3.4 + randf() * 2.2, sin(a) * spd),
+			"rot": randf() * TAU,
+			"age": 0.0,
+			"life": 1.15 + randf() * 0.35,
+		})
+
+
+func update_and_emit_pools(dt: float, t: float, height_fn: Callable, fx_node: Node) -> void:
+	# Update & draw shatter debris
+	var i := debris.size() - 1
+	while i >= 0:
+		var d: Dictionary = debris[i]
+		d["age"] = float(d["age"]) + dt
+		var u := float(d["age"]) / float(d["life"])
+		if u >= 1.0:
+			debris.remove_at(i)
 		else:
-			ls.beam(Vector3(0, 0, 0), Vector3(sx * 0.12, -0.1, -0.1), 0.075, 0.055, 5, c.darkened(0.12))
-			ls.sphere(Vector3(sx * 0.13, -0.11, -0.1), 0.055, c.darkened(0.2), 6, 4)
-			ls.beam(Vector3(sx * 0.13, -0.11, -0.1), Vector3(sx * 0.16, -0.2, 0.12), 0.05, 0.035, 5, c.darkened(0.16))
-			ls.box(Vector3(sx * 0.17, -0.22, 0.2), Vector3(0.14, 0.03, 0.2), c.darkened(0.28))
-		ls.instance(leg, "leg")
-		parts["leg%d" % i] = leg
+			var vel: Vector3 = d["vel"]
+			var p: Vector3 = d["pos"]
+			vel.y -= 15.5 * dt
+			p += vel * dt
+			var gy := float(height_fn.call(p.x, p.z)) + 0.08 if height_fn.is_valid() else 0.08
+			if p.y < gy:
+				p.y = gy
+				vel.y = absf(vel.y) * 0.34
+				vel.x *= 0.65
+				vel.z *= 0.65
+				d["vrot"] = d["vrot"] * 0.55
+			d["pos"] = p
+			d["vel"] = vel
+			d["rot"] = d["rot"] + d["vrot"] * dt
+			var sc := float(d["scale"]) * (1.0 - U.smooth(0.65, 1.0, u))
+			var xf := Transform3D(Basis.from_euler(d["rot"]).scaled(Vector3.ONE * sc), p)
+			push_part(String(d["key"]), xf, d["col"], 0.0)
+		i -= 1
 
-# ---------------------------------------------------------------- 石像
+	# Update & draw bouncing gold coins
+	i = coins.size() - 1
+	while i >= 0:
+		var c: Dictionary = coins[i]
+		c["age"] = float(c["age"]) + dt
+		var u := float(c["age"]) / float(c["life"])
+		if u >= 1.0:
+			coins.remove_at(i)
+		else:
+			var vel: Vector3 = c["vel"]
+			var p: Vector3 = c["pos"]
+			vel.y -= 14.5 * dt
+			p += vel * dt
+			var gy := float(height_fn.call(p.x, p.z)) + 0.14 if height_fn.is_valid() else 0.14
+			if p.y < gy:
+				p.y = gy
+				vel.y = absf(vel.y) * 0.45
+				vel.x *= 0.72
+				vel.z *= 0.72
+			c["pos"] = p
+			c["vel"] = vel
+			c["rot"] = float(c["rot"]) + dt * 7.5
+			var sc := 1.0 - U.smooth(0.75, 1.0, u)
+			var xf := Transform3D(Basis(Vector3.UP, float(c["rot"])).scaled(Vector3.ONE * sc), p)
+			push_part("coin", xf, Color.WHITE, 0.0)
+			if fx_node != null and u < 0.25:
+				fx_node.push_add(p.x, p.y, p.z, 0.45, 0.45, Color(1.0, 0.85, 0.35), (1.0 - u * 4.0) * 0.7, 5, float(c["rot"]), u * 4.0)
+		i -= 1
 
-func _golem(c: Color, top: float) -> void:
-	var leg_h := top * 0.38
-	var s := Soup.new()
-	var glow: Color = game.biome.get("wisp_hex", Color("ff8030")) if biome_hot() else Color("8fe0ff")
-	# 腿：石块堆叠
-	for sx in [-1.0, 1.0]:
-		s.box(Vector3(sx * top * 0.16, leg_h * 0.5, 0), Vector3(top * 0.2, leg_h * 0.8, top * 0.2), c.darkened(0.18), Basis.IDENTITY, 0.5, 1.0)
-		s.box(Vector3(sx * top * 0.16, leg_h * 0.12, top * 0.03), Vector3(top * 0.24, leg_h * 0.24, top * 0.26), c.darkened(0.3), Basis.IDENTITY, 0.5, 0.95)
-	# 躯干：三块错位巨石
-	s.box(Vector3(0, leg_h + top * 0.24, 0), Vector3(top * 0.5, top * 0.45, top * 0.34), c, Basis(Vector3.FORWARD, 0.06), 0.55, 1.0)
-	s.box(Vector3(0, leg_h + top * 0.12, 0), Vector3(top * 0.44, top * 0.22, top * 0.3), c.darkened(0.12))
-	s.box(Vector3(-top * 0.28, leg_h + top * 0.34, 0), Vector3(top * 0.2, top * 0.26, top * 0.28), c.lightened(0.06), Basis(Vector3.FORWARD, -0.1))
-	s.box(Vector3(top * 0.28, leg_h + top * 0.34, 0), Vector3(top * 0.2, top * 0.26, top * 0.28), c.lightened(0.06), Basis(Vector3.FORWARD, 0.1))
-	# 头：方石 + 眼槽
-	s.box(Vector3(0, leg_h + top * 0.56, -top * 0.02), Vector3(top * 0.28, top * 0.22, top * 0.26), c.lightened(0.08), Basis.IDENTITY, 0.7, 1.0)
-	s.box(Vector3(0, leg_h + top * 0.54, -top * 0.14), Vector3(top * 0.3, top * 0.07, top * 0.06), Color("141018"))
-	for sx in [-1.0, 1.0]:
-		_glow_dot(body_root, Vector3(sx * top * 0.07, leg_h + top * 0.55, -top * 0.15), top * 0.03, Color("ffb24a"))
-	# 肩甲
-	for sx in [-1.0, 1.0]:
-		s.sphere(Vector3(sx * top * 0.3, leg_h + top * 0.46, 0), top * 0.17, c.lightened(0.04), 8, 5, Vector3(1.1, 0.6, 1.1), 0.7, 1.0)
-	# 熔岩/冰裂纹
-	for k in 5:
-		s.box(Vector3((float(k) - 2.0) * top * 0.09, leg_h + top * 0.22, -top * 0.17), Vector3(top * 0.055, top * 0.02, top * 0.2), glow, Basis(Vector3.FORWARD, 0.35 * float(k)), 1.0, 1.0)
-	# 手臂（枢轴）
-	for sx in [-1.0, 1.0]:
-		var arm := MeshKit.pivot(body_root, Vector3(sx * top * 0.34, leg_h + top * 0.44, 0))
-		var as_ := Soup.new()
-		as_.box(Vector3(0, -top * 0.12, 0), Vector3(top * 0.16, top * 0.28, top * 0.16), c.darkened(0.08), Basis.IDENTITY, 0.6, 1.0)
-		as_.box(Vector3(sx * top * 0.03, -top * 0.32, 0), Vector3(top * 0.19, top * 0.2, top * 0.19), c)
-		as_.box(Vector3(sx * top * 0.05, -top * 0.46, 0.01), Vector3(top * 0.22, top * 0.12, top * 0.22), c.darkened(0.15))
-		as_.instance(arm, "arm")
-		parts["armL" if sx < 0.0 else "armR"] = arm
-	s.instance(body_root, "body")
-	# 胸核
-	var core := Soup.new()
-	core.sphere(Vector3.ZERO, top * 0.09, glow, 8, 5, Vector3(1, 1, 1), 1.0, 1.0)
-	var cmi := core.instance(body_root, "core")
-	cmi.position = Vector3(0, leg_h + top * 0.26, -top * 0.18)
-	cmi.material_override = MeshKit.mat(glow, 2.2, 0.5)
-
-func biome_hot() -> bool:
-	return String(game.biome_key) == "ember"
-
-# ---------------------------------------------------------------- 每帧
-
-func advance(dt: float, world) -> void:
-	var slowness := 1.0 - slow_amt
-	var fr := 1.0
-	if def.has("frenzy"):
-		fr = 1.0 + float(def["frenzy"]) * (1.0 - hp / max_hp)
-	if def.has("enrage") and not enraged and hp / max_hp <= float(def["enrage"][0]):
-		enraged = true
-		boss_moment()
-	var spd := base_speed * speed_mul * slowness * haste * fr
-	s += spd * dt
-	var p: Vector3 = world.world_at(s, lateral)
-	if flying:
-		p.y = alt
-		p.x += side * 0.4
-		p.z += cos(t * 1.3) * 0.3
-	position = p
-	var nxt: Vector3 = world.world_at(minf(s + 0.4, world.length), lateral)
-	var dir := nxt - Vector3(p.x, 0, p.z)
-	if dir.length_squared() > 0.001:
-		yaw = atan2(dir.x, dir.z)
-	rotation.y = lerp_angle(rotation.y, yaw, minf(1.0, dt * 8.0))
-	if slow_t > 0.0:
-		slow_t -= dt
-		if slow_t <= 0.0:
-			slow_amt = 0.0
-	if def.has("regen"):
-		hp = minf(max_hp, hp + max_hp * float(def["regen"]) * dt)
-
-func animate(dt: float, moving: bool) -> void:
-	t += dt
-	var b := sin(t * 9.0)
-	if parts.has("legL") and moving:
-		parts["legL"].rotation.x = b * 0.7
-		parts["legR"].rotation.x = -b * 0.7
-	if parts.has("armL"):
-		parts["armL"].rotation.x = -b * 0.5
-		parts["armR"].rotation.x = b * 0.5
-	for k in 6:
-		var key := "leg%d" % k
-		if parts.has(key) and moving:
-			parts[key].rotation.z = sin(t * 14.0 + float(k)) * 0.32
-	if parts.has("wingL"):
-		parts["wingL"].rotation.z = sin(t * 18.0) * 0.85
-		parts["wingR"].rotation.z = -sin(t * 18.0) * 0.85
-	if parts.has("blob"):
-		var kk := sin(t * (7.0 if def.has("hop") else 3.0))
-		parts["blob"].scale = Vector3(1.0 + kk * 0.08, 1.0 - kk * 0.1, 1.0 + kk * 0.08)
-	if body_root != null:
-		body_root.position.y = absf(sin(t * 6.0)) * 0.03
-	if flash > 0.0:
-		flash = maxf(0.0, flash - dt * 4.0)
-		if hpfill != null:
-			hpfill.scale.x = maxf(0.02, hp / max_hp)
-	if hpbar != null and hpbar.visible:
-		hpbar.global_transform = Transform3D(game.camera.global_basis, hpbar.global_position)
-		hpfill.scale.x = clampf(hp / max_hp, 0.01, 1.0)
-		hpfill.position.x = -0.3 * (1.0 - hpfill.scale.x)
-
-func set_slow(amount: float, dur: float) -> void:
-	var a := amount
-	var d := dur
-	if boss:
-		a *= 0.4
-		d *= 0.6
-	if def.has("slow_res"):
-		a *= 1.0 - float(def["slow_res"])
-	if a > slow_amt:
-		slow_amt = a
-	slow_t = maxf(slow_t, d)
-
-func take_damage(amount: float, kind: String, source: Node = null) -> bool:
-	if not alive:
-		return false
-	if ghosting and (kind == "arrow" or kind == "sword"):
-		if randf() < 0.5:
-			return false
-		amount *= 0.5
-	if kind == "arrow" and def.has("armor"):
-		amount *= float(def["armor"])
-	hp -= amount
-	flash = 1.0
-	last_hit = Time.get_ticks_msec() / 1000.0
-	if source != null and source.has_method("add_damage"):
-		source.add_damage(amount)
-	if hp <= 0.0:
-		hp = 0.0
-		alive = false
-		return true
-	return false
-
-func boss_moment() -> void:
-	if hpbar != null:
-		hpbar.visible = true
-
-func hp_ratio() -> float:
-	return hp / max_hp
-
-func progress() -> float:
-	return s
+	# Suppress unused warning for t
+	var _t_used := t

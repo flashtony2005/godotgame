@@ -4,9 +4,11 @@ const UI = (() => {
     ctx: null, s: 3, insetTop: 0, goldShown: 0, hurt: 0, coins: [], msg: null, hover: null, menu: null, armed: null, idle: 99, mx: -1, my: -1, inside: false,
     btns: [], hotBtn: null, press: null, gp: { sel: -1, t: 0, prev: [] , active: false }, goldBump: 0, deny: 0, hintT: 0, titleT: 0, rangeMesh: null, padMesh: null, soundRect: null, cmdRect: null, manual: false, moved: 99, focus: 0, slainBump: 0, lastSlain: 0,
     touch: false, ptrs: new Map(), gest: null, lastTap: { t: -9, x: 0, y: 0 }, waveRect: null, followRect: null, menuRect: null, wake: null, panning: false,
-    hud: [], tips: [], tip: null, keys: new Set(), sndArmed: false, vvT: 0, vvN: 0,
+    hud: [], tips: [], tip: null, keys: new Set(), sndArmed: false, vvT: 0, vvN: 0, audioOpen: false,
   };
   const COLR = { bg: 'rgba(9,11,17,0.86)', bg2: 'rgba(24,27,38,0.94)', bd: '#5d4c35', bdHi: '#e8b04a', tx: '#efe4cd', dim: '#a79e8a', amber: '#e8b04a', ember: '#ff8a3c', cold: '#8fc7ff', red: '#e5553c', dark: '#0b0d14', ok: '#9fd08a' };
+  const AUI = { btn: null, overlay: null, dialog: null, closeBtn: null, slider: null, readout: null, muteBtn: null, muteLabel: null, btnVal: null, note: null, lastPos: '', lastReady: null };
+  function isAudioUI(target) { return !!(target && target.closest && target.closest('[data-audio-ui]')); }
   const _pv = new THREE.Vector3(), _o = new THREE.Vector3(), _d = new THREE.Vector3();
   function proj(x, y, z) { _pv.set(x, y, z).project(R.cam); return { x: (_pv.x * .5 + .5) * R.dw, y: (1 - (_pv.y * .5 + .5)) * R.dh }; }
   U.proj = proj;
@@ -41,6 +43,7 @@ const UI = (() => {
     U.touch = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
     const D = () => R.dpr || 1, pos = e => [e.clientX * D(), e.clientY * D()];
     window.addEventListener('pointerdown', e => {
+      if (isAudioUI(e.target) || U.audioOpen) return;
       const [x, y] = pos(e); U.touch = e.pointerType !== 'mouse'; U.mx = x; U.my = y; U.inside = true; U.gp.active = false; U.moved = 0;
       U.ptrs.set(e.pointerId, { x, y, x0: x, y0: y });
       audioGesture();
@@ -50,6 +53,7 @@ const UI = (() => {
       e.preventDefault();
     }, { passive: false });
     window.addEventListener('pointermove', e => {
+      if (U.audioOpen || (isAudioUI(e.target) && !U.ptrs.has(e.pointerId))) { if (!U.ptrs.size) U.inside = false; return; }
       const [x, y] = pos(e), p = U.ptrs.get(e.pointerId);
       if (e.pointerType === 'mouse' || p) { U.mx = x; U.my = y; U.inside = true; U.moved = 0; U.gp.active = false; }
       if (!p) return;
@@ -71,23 +75,43 @@ const UI = (() => {
     window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
     window.addEventListener('pointerleave', () => { if (!U.ptrs.size) U.inside = false; });
     document.addEventListener('mouseleave', () => { if (!U.ptrs.size) U.inside = false; });
-    window.addEventListener('wheel', e => { const [x, y] = pos(e), d = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY; camZoomTo(camZoomNow() * Math.exp(-clamp(d, -160, 160) * (e.ctrlKey ? .012 : .0024)), x, y, 16); e.preventDefault(); }, { passive: false });
-    const stop = e => { if (e.cancelable) e.preventDefault(); };
+    window.addEventListener('wheel', e => {
+      if (isAudioUI(e.target) || U.audioOpen) return;
+      const [x, y] = pos(e), d = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      camZoomTo(camZoomNow() * Math.exp(-clamp(d, -160, 160) * (e.ctrlKey ? .012 : .0024)), x, y, 16);
+      e.preventDefault();
+    }, { passive: false });
+    const stop = e => { if (isAudioUI(e.target) || U.audioOpen) return; if (e.cancelable) e.preventDefault(); };
     for (const ev of ['touchmove', 'touchcancel', 'dblclick', 'gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(ev, stop, { passive: false });
     document.addEventListener('touchstart', e => {
+      if (isAudioUI(e.target) || U.audioOpen) return;
       stop(e); const n = e.touches.length;
       if (n < U.ptrs.size) { const keys = [...U.ptrs.keys()]; for (let i = 0; i < keys.length - n; i++) U.ptrs.delete(keys[i]); if (U.ptrs.size <= 1) { const p = [...U.ptrs.values()][0]; U.gest = p ? { mode: 'tap', hud: !!btnAt(p.x, p.y) || hudAt(p.x, p.y) } : null; } }
     }, { passive: false });
-    document.addEventListener('touchend', e => { audioGesture(); stop(e); if (!e.touches.length && U.ptrs.size) setTimeout(() => { if (U.ptrs.size) U.dropTouches(); }, 80); }, { passive: false });
+    document.addEventListener('touchend', e => {
+      if (isAudioUI(e.target) || U.audioOpen) return;
+      audioGesture(); stop(e); if (!e.touches.length && U.ptrs.size) setTimeout(() => { if (U.ptrs.size) U.dropTouches(); }, 80);
+    }, { passive: false });
     if (window.visualViewport) for (const ev of ['resize', 'scroll']) window.visualViewport.addEventListener(ev, fixPageZoom);
-    try { if (localStorage.getItem('cinderwatch.muted') === '1') AU.muted = true; G.best = +localStorage.getItem('cinderwatch.best') || 0; } catch (e) {}
+    try {
+      const saved = AUDIO_STATE.parseStoredState(localStorage.getItem('cinderwatch.volume'), localStorage.getItem('cinderwatch.muted'));
+      AU.setVolume(saved.volume);
+      AU.setMuted(saved.muted);
+      G.best = +localStorage.getItem('cinderwatch.best') || 0;
+    } catch (e) {}
+    initAudioOverlay();
     window.addEventListener('keyup', e => { U.keys.delete(e.code); });
     window.addEventListener('blur', () => U.keys.clear());
-    window.addEventListener('contextmenu', e => e.preventDefault());
+    window.addEventListener('contextmenu', e => { if (!isAudioUI(e.target)) e.preventDefault(); });
     window.addEventListener('keydown', e => {
+      const k = e.key;
+      const inAudio = isAudioUI(e.target) || U.audioOpen;
+      if (k === 'Escape' && U.audioOpen) { setAudioOpen(false); e.preventDefault(); return; }
+      if (!e.repeat && (k === 'o' || k === 'O') && !e.ctrlKey && !e.metaKey && !e.altKey) { audioGesture(); setAudioOpen(!U.audioOpen); e.preventDefault(); return; }
+      if (!e.repeat && (k === 'm' || k === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { audioGesture(); toggleMute(); e.preventDefault(); return; }
+      if (inAudio) return;
       if (PAN[e.code] && !e.ctrlKey && !e.metaKey && !e.altKey) { U.keys.add(e.code); e.preventDefault(); }
       if (e.repeat) return; audioGesture(); U.keepAwake(); U.touch = false;
-      const k = e.key;
       if (k >= '1' && k <= '4') { pickKind(TOWER_KINDS[+k - 1]); e.preventDefault(); }
       else if (k === ' ' || k === 'Enter') { callWave(); e.preventDefault(); }
       else if (k === 'Escape') { U.closeMenu(); }
@@ -96,7 +120,6 @@ const UI = (() => {
       else if (k === 'p' || k === 'P') { togglePause(); }
       else if (k === 'Tab') { cycleSpeed(); e.preventDefault(); }
       else if (k === '0') { camReset(); }
-      else if (k === 'm' || k === 'M') { setMute(!AU.muted); }
       else if (k === '+' || k === '=') { camZoomBy(1.4); }
       else if (k === '-' || k === '_') { camZoomBy(1 / 1.4); }
       else if (k === 'c' || k === 'C') { toggleCommand(); }
@@ -116,7 +139,89 @@ const UI = (() => {
     const c = 'width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover';
     m.setAttribute('content', c + ',shrink-to-fit=no'); setTimeout(() => { m.setAttribute('content', c); try { window.scrollTo(0, 0); } catch (e) {} resizeRenderer(); }, 40);
   }
-  function setMute(b) { AU.setMuted(b); try { localStorage.setItem('cinderwatch.muted', b ? '1' : '0'); } catch (e) {} }
+  function saveAudioPrefs() {
+    try {
+      localStorage.setItem('cinderwatch.muted', AU.muted ? '1' : '0');
+      localStorage.setItem('cinderwatch.volume', String(AU.volume));
+    } catch (e) {}
+  }
+  function syncAudioUI() {
+    const pct = AUDIO_STATE.volumeToPercent(AU.volume);
+    const muted = !!AU.muted;
+    const silent = muted || pct === 0;
+    if (AUI.btn) {
+      AUI.btn.classList.toggle('is-muted', silent);
+      AUI.btn.setAttribute('aria-expanded', U.audioOpen ? 'true' : 'false');
+    }
+    if (AUI.btnVal) AUI.btnVal.textContent = AUDIO_STATE.formatStatusText(AU.volume, muted);
+    if (AUI.dialog) AUI.dialog.classList.toggle('is-muted', silent);
+    if (AUI.slider) {
+      AUI.slider.value = String(pct);
+      AUI.slider.style.setProperty('--vol-pct', pct + '%');
+      AUI.slider.setAttribute('aria-valuetext', muted ? pct + '% (muted)' : pct + '%');
+    }
+    if (AUI.readout) AUI.readout.textContent = pct + '%';
+    if (AUI.muteBtn) {
+      AUI.muteBtn.setAttribute('aria-pressed', muted ? 'true' : 'false');
+      AUI.muteBtn.classList.toggle('is-muted', muted);
+    }
+    if (AUI.muteLabel) AUI.muteLabel.textContent = muted ? 'Unmute Audio' : 'Mute Audio';
+    if (AUI.note) {
+      AUI.note.textContent = muted ? 'Audio muted' : (pct === 0 ? 'Volume at 0%' : (AU.ready ? 'Audio active' : 'Activates on interaction'));
+    }
+  }
+  function setAudioOpen(open) {
+    const next = !!open;
+    if (U.audioOpen === next) return;
+    U.audioOpen = next;
+    U.dropTouches();
+    U.keys.clear();
+    if (AUI.overlay) AUI.overlay.hidden = !next;
+    syncAudioUI();
+    if (next) {
+      if (AUI.slider) AUI.slider.focus({ preventScroll: true });
+    } else if (AUI.btn) {
+      AUI.btn.focus({ preventScroll: true });
+    }
+  }
+  function setVolume(v) {
+    const next = AUDIO_STATE.applyVolumeChange({ volume: AU.volume, muted: AU.muted }, v);
+    AU.setVolume(next.volume);
+    AU.setMuted(next.muted);
+    saveAudioPrefs();
+    syncAudioUI();
+  }
+  function setMute(b) {
+    const next = AUDIO_STATE.applyMuteToggle({ volume: AU.volume, muted: AU.muted }, b);
+    AU.setVolume(next.volume);
+    AU.setMuted(next.muted);
+    saveAudioPrefs();
+    syncAudioUI();
+  }
+  function toggleMute() { setMute(!AU.muted); }
+  function initAudioOverlay() {
+    AUI.btn = document.getElementById('audio-menu-btn');
+    AUI.overlay = document.getElementById('audio-overlay');
+    AUI.dialog = document.getElementById('audio-dialog');
+    AUI.closeBtn = document.getElementById('audio-close-btn');
+    AUI.slider = document.getElementById('master-volume-slider');
+    AUI.readout = document.getElementById('master-volume-value');
+    AUI.muteBtn = document.getElementById('audio-mute-btn');
+    AUI.muteLabel = document.getElementById('audio-mute-label');
+    AUI.btnVal = document.getElementById('audio-btn-val');
+    AUI.note = document.getElementById('audio-state-note');
+    if (AUI.btn) AUI.btn.addEventListener('click', () => { audioGesture(); setAudioOpen(!U.audioOpen); sfx('uiClick', CAM.x, CAM.z, .6); });
+    if (AUI.closeBtn) AUI.closeBtn.addEventListener('click', () => { setAudioOpen(false); sfx('uiClick', CAM.x, CAM.z, .5); });
+    if (AUI.overlay) AUI.overlay.addEventListener('click', e => { if (e.target === AUI.overlay) { setAudioOpen(false); sfx('uiClick', CAM.x, CAM.z, .5); } });
+    if (AUI.slider) {
+      const onSlide = () => { audioGesture(); setVolume(AUDIO_STATE.percentToVolume(AUI.slider.value)); };
+      AUI.slider.addEventListener('input', onSlide);
+      AUI.slider.addEventListener('change', onSlide);
+    }
+    if (AUI.muteBtn) AUI.muteBtn.addEventListener('click', () => { audioGesture(); toggleMute(); sfx('uiClick', CAM.x, CAM.z, .6); });
+    syncAudioUI();
+  }
+  U.setAudioOpen = setAudioOpen; U.setVolume = setVolume; U.setMute = setMute; U.toggleMute = toggleMute; U.syncAudioUI = syncAudioUI;
   function fullscreenOK() { const d = document; return !!(d.fullscreenEnabled || d.webkitFullscreenEnabled) && !(window.navigator.standalone); }
   function isFull() { const d = document; return !!(d.fullscreenElement || d.webkitFullscreenElement); }
   function toggleFull() {
@@ -211,6 +316,7 @@ const UI = (() => {
       U.s = sc; }
     U.panning = !!(U.gest && U.gest.mode === 'pan');
     if (AU.ready && !U.ptrs.size) U.sndArmed = true;
+    if (AUI.lastReady !== AU.ready) { AUI.lastReady = AU.ready; syncAudioUI(); }
     if (U.keys.size) { let kx = 0, ky = 0; for (const k of U.keys) { kx += PAN[k][0]; ky += PAN[k][1]; } if (kx || ky) { CAM.za = null; camPan(kx * R.dh * .9 * dt, ky * R.dh * .9 * dt); } }
     if (U.tip) { U.tip.t += dt; if (U.tip.t > 5.2) U.tip = null; } else if (U.tips.length && U.titleT > 7.5) U.tip = { type: U.tips.shift(), t: 0 };
     if (window.visualViewport && Math.abs(window.visualViewport.scale - 1) > .02) fixPageZoom();
@@ -290,10 +396,16 @@ const UI = (() => {
     let xl = 5 * s + iL;
     sq('pause', xl, zb, togglePause, G.paused ? 'Resume (P)' : 'Pause (P)', bars, G.paused); xl += zb + g3;
     sq('speed', xl, zb, cycleSpeed, 'Speed (Tab)', label(G.speed + 'x', G.speed > 1 ? COLR.amber : COLR.tx), G.speed > 1); xl += zb + g3;
-    { const on = AU.ready && !AU.muted, icn = on ? 'sound' : 'mute', k = Math.max(s, Math.floor(zb / 14)), [iw2, ih2] = PX.iconSize(icn), lbl = tch ? 'Tap for sound' : 'Click for sound', wl = iw2 * s + 3 * s + tw(lbl) + pad * 2;
-      const wide = !AU.ready && xl + wl + g3 + rightW + 5 * s + iR <= W;
-      U.soundRect = sq('sound', xl, wide ? wl : zb, soundTap, AU.ready ? (AU.muted ? 'Sound is off (M)' : 'Sound is on (M)') : 'Sound', (x, y) => { if (wide) { PX.icon(c, icn, x + pad, y + Math.round((zb - ih2 * s) / 2), s, .85); text(lbl, x + pad + iw2 * s + 3 * s, y + Math.round((zb - LH) / 2) + s, COLR.tx); } else PX.icon(c, icn, x + Math.round((zb - iw2 * k) / 2), y + Math.round((zb - ih2 * k) / 2), k, AU.ready ? 1 : .8); }, !AU.ready);
-      xl += (wide ? wl : zb) + g3; }
+    { if (AUI.btn) {
+        const leftCss = Math.round(xl / dpr), bottomCss = Math.round((H - (yB + zb)) / dpr), hCss = Math.round(zb / dpr);
+        const key = leftCss + ',' + bottomCss + ',' + hCss;
+        if (AUI.lastPos !== key) { AUI.lastPos = key; AUI.btn.style.left = leftCss + 'px'; AUI.btn.style.bottom = bottomCss + 'px'; AUI.btn.style.height = hCss + 'px'; }
+        xl += Math.ceil((AUI.btn.offsetWidth || 104) * dpr) + g3;
+      } else {
+        const on = AU.ready && !AU.muted, icn = on ? 'sound' : 'mute', k = Math.max(s, Math.floor(zb / 14)), [iw2, ih2] = PX.iconSize(icn);
+        U.soundRect = sq('sound', xl, zb, soundTap, AU.muted ? 'Sound is off (M)' : 'Sound is on (M)', (x, y) => { PX.icon(c, icn, x + Math.round((zb - iw2 * k) / 2), y + Math.round((zb - ih2 * k) / 2), k, AU.ready ? 1 : .8); }, !AU.ready);
+        xl += zb + g3;
+      } }
     let xr = Wr - 5 * s - zb; const cur = camZoomNow();
     if (nR === 3) { sq('full', xr, zb, toggleFull, 'Full screen', corners, false); xr -= zb + g3; }
     sq('zin', xr, zb, () => camZoomBy(1.5), 'Zoom in (+)', glyph('+', cur < 2.99 ? COLR.tx : '#5a5448'), false); xr -= zb + g3;

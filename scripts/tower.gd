@@ -1,519 +1,590 @@
 extends Node3D
+## Complete 4x3 Tower System with Scaffolding Build/Upgrade Animations, Recoiling Bombard,
+## Levitating Storm Spire Crystal + Rune Ring, Archer Parapet Sentries, Guard Barracks, and Frost Freeze.
+## Ported & enhanced from 60-towers.js.
 
-## 高模版塔：全部几何由 Soup 程序化生成（渐缩棱柱 / 梁 / 球 / 板），逐顶点 AO 烘进顶点色。
-## 一座塔合成一张网格；炮管、水晶、塔顶弓手这类需要转向的部件单独一张。
+const U = preload("res://scripts/util.gd")
+const TX = preload("res://scripts/textures.gd")
+const Soup = preload("res://scripts/soup.gd")
+const Defs = preload("res://scripts/defs.gd")
 
-const Defs := preload("res://scripts/defs.gd")
-const Soup := preload("res://scripts/soup.gd")
-
-const WOOD := Color("6b4a32")
-const WOOD_D := Color("3f2c1e")
-const WOOD_L := Color("8a6544")
-const STONE := Color("7a7684")
-const STONE_D := Color("454250")
-const STONE_L := Color("9a96a2")
-const IRON := Color("3c4048")
-const EMBER := Color("ff8a3c")
-const CLOTH_R := Color("8a2f2a")
-const CLOTH_B := Color("2f4a7a")
-const BASALT := Color("35313f")
-const BASALT_L := Color("4e4a5e")
-const COPPER := Color("8a5a3a")
-const CRYSTAL := Color("8fe0ff")
-const SKIN := Color("c8b090")
-
+var pad_idx := -1
 var kind := "archer"
-var lvl := 0
-var def: Dictionary = {}
-var pad: Dictionary = {}
-var body: Node3D
-var turret: Node3D
-var spent := 0
-var dealt := 0.0
-var cooldown := 0.0
+var level := 0 # 0, 1, 2
+var stats: Dictionary = {}
+var total_cost := 0
+
+# Build / upgrade scaffolding animation state
+var building := true
+var build_t := 0.0
+var build_dur := 1.05
+var _pieces_data: Array = [] # [{mi: MeshInstance3D, start: float, dur: float, drop: float, landed: bool}]
+var _scaffold_mi: MeshInstance3D = null
+var _static_mi: MeshInstance3D = null
+var _static_soup: Soup = null
+
+# Active animated sub-parts
+var turret_node: Node3D = null # Bombard yaw carriage
+var barrel_node: Node3D = null # Bombard pitch & recoil barrel
+var crystal_node: Node3D = null # Spire levitating crystal + orbiting shards
+var ring_node: Node3D = null # Spire counter-rotating rune ring
+var freeze_mi: MeshInstance3D = null # Frost Jotun stun ice shell
+
+# Combat & visual state
+var cd := 0.0
+var charge_t := 0.0
+var recoil := 0.0
+var aim_yaw := 0.0
 var stun := 0.0
-var alive := true
-var footmen: Array = []
-var game = null
-var _lights: Array = []
-var _shards: Array = []
-var _t := 0.0
+var hit_flash := 0.0
+var mounts: Dictionary = {} # {flames: Array[Vector3], archers: Array[Vector3], fire_pos: Vector3, rally: Vector3}
+var flame_handles: Array[Dictionary] = []
+var archer_anim: Array[Dictionary] = [] # [{yaw: float, draw: float, fire_cd: float}]
+var footmen_ids: Array = [] # references to guard footmen managed by game.gd
 
-func setup(p_kind: String, p_pad: Dictionary, p_game) -> void:
+var _rng: U.Rng
+
+
+func setup(p_pad_idx: int, p_kind: String, p_pos: Vector3, p_seed: int, fx_node: Node, audio_node: Node) -> void:
+	pad_idx = p_pad_idx
 	kind = p_kind
-	pad = p_pad
-	game = p_game
-	def = Defs.TOWER[kind]
-	lvl = 0
-	spent = int(def["cost"][0])
-	position = Vector3(pad["x"], 0.24, pad["z"])
-	_rebuild()
+	level = 0
+	position = p_pos
+	_rng = U.make_rng(p_seed)
+	stats = Defs.TOWERS[kind][level]
+	total_cost = int(stats["cost"])
+	_start_construction(fx_node, audio_node)
 
-func stats() -> Dictionary:
-	var d := def
-	var out := {}
-	for k in ["range", "dmg", "rate"]:
-		out[k] = float(d[k][lvl])
-	if d.has("count"):
-		out["count"] = int(d["count"][lvl])
-	if d.has("splash"):
-		out["splash"] = float(d["splash"][lvl])
-	if d.has("jumps"):
-		out["jumps"] = int(d["jumps"][lvl])
-	if d.has("slow"):
-		out["slow"] = float(d["slow"][lvl])
-		out["slow_t"] = float(d["slow_t"][lvl])
-	if d.has("hp"):
-		out["hp"] = float(d["hp"][lvl])
-	return out
 
-func can_upgrade() -> bool:
-	return alive and lvl < 2
+func upgrade(fx_node: Node, audio_node: Node) -> bool:
+	if level >= 2 or building:
+		return false
+	level += 1
+	stats = Defs.TOWERS[kind][level]
+	total_cost += int(stats["cost"])
+	_clear_flames(fx_node)
+	_start_construction(fx_node, audio_node)
+	return true
 
-func upgrade_cost() -> int:
-	if lvl >= 2:
-		return 0
-	return int(def["cost"][lvl + 1])
 
-func upgrade() -> void:
-	if lvl >= 2:
-		return
-	lvl += 1
-	spent += int(def["cost"][lvl])
-	_rebuild()
+func get_sell_value() -> int:
+	return int(round(float(total_cost) * 0.72))
 
-func sell_refund() -> int:
-	return int(round(float(spent) * 0.6))
 
-func add_damage(v: float) -> void:
-	dealt += v
+func get_next_stats() -> Dictionary:
+	if level >= 2:
+		return {}
+	return Defs.TOWERS[kind][level + 1]
 
-func _rebuild() -> void:
-	if body != null:
-		body.queue_free()
-	for l in _lights:
-		if is_instance_valid(l):
-			l.queue_free()
-	_lights.clear()
-	_shards.clear()
-	body = Node3D.new()
-	add_child(body)
-	turret = null
-	match kind:
-		"archer": _build_archer()
-		"bombard": _build_bombard()
-		"spire": _build_spire()
-		"guard": _build_guard()
-	body.scale = Vector3(1.0, 0.22, 1.0)
-	var tw := create_tween()
-	tw.tween_property(body, "scale", Vector3.ONE, 0.42).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-	if kind == "guard":
-		_spawn_footmen()
 
-func _torch(pos: Vector3, size_v: float) -> void:
-	var l := OmniLight3D.new()
-	l.light_color = Color("ff9a4a")
-	l.light_energy = 0.9 + size_v
-	l.omni_range = 3.4 + size_v * 2.2
-	l.position = pos
-	body.add_child(l)
-	_lights.append(l)
+func clear_visuals(fx_node: Node) -> void:
+	_clear_flames(fx_node)
+	for ch in get_children():
+		ch.queue_free()
+	_pieces_data.clear()
+	_scaffold_mi = null
+	_static_mi = null
+	turret_node = null
+	barrel_node = null
+	crystal_node = null
+	ring_node = null
+	freeze_mi = null
 
-func _process(delta: float) -> void:
-	_t += delta
-	for l in _lights:
-		if is_instance_valid(l):
-			l.light_energy = 0.85 + 0.25 * sin(_t * 7.0 + float(l.get_instance_id() % 7))
-	for sh in _shards:
-		if is_instance_valid(sh["node"]):
-			var pivot: Node3D = sh["node"]
-			pivot.rotation.y = _t * float(sh["spin"])
-			pivot.position.y = float(sh["y"]) + sin(_t * 1.4 + float(sh["ph"])) * 0.08
 
-# ---------------------------------------------------------------- 弓手塔
+func _clear_flames(fx_node: Node) -> void:
+	if fx_node != null:
+		for fh in flame_handles:
+			fx_node.remove_flame(fh)
+	flame_handles.clear()
 
-func _build_archer() -> void:
-	var l := lvl
-	var bh: float = [0.25, 1.0, 1.9][l]
-	var h: float = [2.0, 2.7, 3.35][l]
-	var w: float = [0.75, 0.85, 0.93][l]
-	var s := Soup.new()
-	# 台基：一层暗基石 + 四角石墩
-	s.box(Vector3(0, 0.13, 0), Vector3(1.66, 0.26, 1.66), STONE_D, Basis.IDENTITY, 0.55, 1.0)
-	for ax in [-1.0, 1.0]:
-		for az in [-1.0, 1.0]:
-			s.box(Vector3(ax * 0.66, 0.19, az * 0.66), Vector3(0.34, 0.38, 0.34), STONE_L, Basis.IDENTITY, 0.6, 1.0)
-	# 石鼓塔身（≥1 级）
-	if l >= 1:
-		s.box(Vector3(0, 0.15, 0), Vector3(1.84, 0.3, 1.84), STONE_D, Basis.IDENTITY, 0.5, 1.0)
-		s.cyl(Vector3(0, 0.3 + (bh - 0.3) * 0.5, 0), 1.06, 0.92, bh - 0.3, STONE, 4, PI * 0.25, 0.55, 1.0)
-		s.box(Vector3(0, bh - 0.05, 0), Vector3(1.44, 0.15, 1.44), STONE_L, Basis.IDENTITY, 0.65, 1.0)
-		for k in 3:
-			s.box(Vector3(0, 0.4 + float(k) * (bh - 0.55) / 3.0, 0.72), Vector3(1.3, 0.035, 0.05), STONE_D)
-		s.box(Vector3(0, 0.62, 0.735), Vector3(0.32, 0.5, 0.06), Color("0a0806"))
-		if l == 2:
-			for ax in [-1.0, 1.0]:
-				for az in [-1.0, 1.0]:
-					s.beam(Vector3(ax * 0.88, 0.28, az * 0.88), Vector3(ax * 0.8, bh + 0.3, az * 0.8), 0.12, 0.09, 4, STONE_L, 0.0, 0.55, 0.95)
-	# 四根立柱（微收分）+ 铁箍
-	for ax in [-1.0, 1.0]:
-		for az in [-1.0, 1.0]:
-			var foot := Vector3(ax * 0.64, bh, az * 0.64)
-			var top := Vector3(ax * (w - 0.08), h, az * (w - 0.08))
-			s.beam(foot, top, 0.095, 0.075, 6, WOOD_D, 0.0, 0.62, 1.0)
-			var n := (top - foot).normalized()
-			s.cyl(foot + n * 0.18, 0.105, 0.105, 0.09, IRON, 6)
-			s.cyl(top - n * 0.1, 0.09, 0.09, 0.08, IRON, 6)
-	# 中段横梁 + 交叉斜撑
-	var ym := (bh + h) * 0.5
-	var rm := lerpf(0.64, w - 0.08, 0.45)
-	for k in 4:
-		var a := float(k) * PI * 0.5
-		s.beam(Vector3(cos(a) * rm, ym, sin(a) * rm), Vector3(-sin(a) * rm, ym, cos(a) * rm), 0.045, 0.045, 4, WOOD, 0.0, 0.75, 0.95)
-	for k in 4:
-		var a1 := float(k) * PI * 0.5
-		var a2 := float((k + 1) % 4) * PI * 0.5
-		s.beam(Vector3(cos(a1) * 0.64, bh + 0.12, sin(a1) * 0.64), Vector3(cos(a2) * (w - 0.1), h - 0.15, sin(a2) * (w - 0.1)), 0.035, 0.035, 4, WOOD_L, 0.0, 0.7, 0.95)
-		s.beam(Vector3(cos(a2) * 0.64, bh + 0.12, sin(a2) * 0.64), Vector3(cos(a1) * (w - 0.1), h - 0.15, sin(a1) * (w - 0.1)), 0.035, 0.035, 4, WOOD, 0.0, 0.7, 0.95)
-	# 甲板：先承重梁，再三排木板，最后一圈收边
-	s.box(Vector3(0, h - 0.05, 0), Vector3(w * 2.0 + 0.3, 0.1, w * 2.0 + 0.3), WOOD_D, Basis.IDENTITY, 0.6, 0.9)
-	for k in 3:
-		var u := (float(k) - 1.0) * w * 0.62
-		s.box(Vector3(u, h - 0.12, 0), Vector3(0.12, 0.1, w * 2.0 + 0.3), WOOD_D)
-		s.box(Vector3(0, h - 0.12, u), Vector3(w * 2.0 + 0.3, 0.1, 0.12), WOOD_D)
-	s.planks(Vector3(0, h + 0.03, 0), w * 2.0 + 0.2, w * 2.0 + 0.2, 8, 0.06, WOOD, Basis.IDENTITY, 0.03)
-	# 栏杆：立板高低交错，背面留楼梯缺口
-	var y0 := h + 0.1
-	for k in 4:
-		var ang := float(k) * PI * 0.5
-		var cs := cos(ang)
-		var sn := sin(ang)
-		for j in 5:
-			if k == 2 and (j == 1 or j == 2):
-				continue
-			var u := (float(j) - 2.0) * w * 0.42
-			var hh: float = 0.3 if (j % 2) == 1 else 0.5
-			var x := u * cs + (w + 0.02) * sn
-			var z := -u * sn + (w + 0.02) * cs
-			s.box(Vector3(x, y0 + hh * 0.5, z), Vector3(w * 0.4, hh, 0.05), WOOD if (j % 2) == 1 else WOOD_L, Basis(Vector3.UP, ang), 0.62, 1.0)
-	for ax in [-1.0, 1.0]:
-		for az in [-1.0, 1.0]:
-			s.box(Vector3(ax * (w + 0.02), y0 + 0.34, az * (w + 0.02)), Vector3(0.11, 0.68, 0.11), WOOD_D, Basis.IDENTITY, 0.6, 0.95)
-			s.box(Vector3(ax * (w + 0.02), y0 + 0.7, az * (w + 0.02)), Vector3(0.15, 0.06, 0.15), IRON)
-	# 背面梯子
-	var lz := -w - 0.02
-	for sg in [-1.0, 1.0]:
-		s.beam(Vector3(sg * 0.17, 0.05, lz - 0.5), Vector3(sg * 0.17, h + 0.06, lz), 0.038, 0.038, 4, WOOD_D)
-	var rungs := int(h / 0.3)
-	for i in rungs:
-		var u := (float(i) + 0.6) / float(rungs)
-		s.box(Vector3(0, 0.16 + u * (h - 0.06), lz - 0.5 + u * 0.5), Vector3(0.36, 0.045, 0.045), WOOD_L)
-	# 火盆
-	var bx := -w + 0.33
-	var bz := -w + 0.35
-	var by := h + 0.1
-	var bs: float = [0.4, 0.46, 0.56][l]
-	if l == 2:
-		s.cyl(Vector3(bx, h + 0.24, bz), 0.18, 0.14, 0.4, STONE_D, 5)
-		by += 0.38
-	for k in 3:
-		var a := TAU * float(k) / 3.0 + 0.5
-		s.beam(Vector3(bx + cos(a) * 0.17, by, bz + sin(a) * 0.17), Vector3(bx + cos(a) * 0.05, by + 0.3, bz + sin(a) * 0.05), 0.026, 0.02, 4, IRON)
-	s.cyl(Vector3(bx, by + 0.33, bz), bs * 0.3, bs * 0.44, bs * 0.24, IRON, 8, 0.0, 0.5, 0.9)
-	s.sphere(Vector3(bx, by + 0.42, bz), bs * 0.33, EMBER, 6, 3, Vector3(1, 0.45, 1), 0.85, 1.0)
-	_torch(Vector3(bx, by + 0.6, bz), bs)
-	# 旗
-	if l >= 1:
-		s.beam(Vector3(w - 0.08, h + 0.1, -w + 0.08), Vector3(w - 0.08, h + 1.9, -w + 0.08), 0.032, 0.022, 5, WOOD_D)
-		s.box(Vector3(w - 0.42, h + 1.58, -w + 0.06), Vector3(0.62, 0.34, 0.02), CLOTH_R, Basis.IDENTITY, 0.85, 1.0)
-		s.box(Vector3(w - 0.42, h + 1.4, -w + 0.06), Vector3(0.5, 0.08, 0.02), CLOTH_R.darkened(0.35))
-	# 塔顶弓手（随目标转向）
-	var tur := Node3D.new()
-	tur.position = Vector3(0, h + 0.09, 0)
-	body.add_child(tur)
-	turret = tur
-	var spots: Array = [[Vector3(0.1, 0, 0.26)], [Vector3(-0.3, 0, 0.4), Vector3(0.4, 0, 0.08)], [Vector3(-0.34, 0, 0.46), Vector3(0.46, 0, 0.26), Vector3(0.2, 0, -0.4)]][l]
-	for sp in spots:
-		_archer_figure(tur, sp, 0.9)
-	s.instance(body, "mesh")
 
-func _archer_figure(parent: Node3D, at: Vector3, sc: float) -> void:
-	var s := Soup.new()
-	var leg := 0.34 * sc
-	var torso := 0.26 * sc
-	for sx in [-1.0, 1.0]:
-		s.beam(at + Vector3(sx * 0.05, leg, 0), at + Vector3(sx * 0.055, 0, -0.02), 0.042, 0.033, 4, Color("2c2a2e"))
-	s.beam(at + Vector3(0, leg, 0), at + Vector3(0, leg + torso, 0), 0.1, 0.085, 6, CLOTH_B)
-	s.box(at + Vector3(0, leg + torso * 0.55, 0), Vector3(0.21, 0.17, 0.15), Color("6a5030"))
-	s.sphere(at + Vector3(0, leg + torso + 0.09, 0), 0.085, SKIN, 8, 5)
-	s.cone(at + Vector3(0, leg + torso + 0.07, 0), 0.125, 0.15, CLOTH_B.darkened(0.45), 7)
-	s.beam(at + Vector3(-0.1, leg + torso * 0.9, 0), at + Vector3(-0.12, leg + torso * 0.5, 0.12), 0.028, 0.026, 4, CLOTH_B)
-	s.beam(at + Vector3(0.1, leg + torso * 0.9, 0), at + Vector3(0.14, leg + torso * 0.52, 0.1), 0.028, 0.026, 4, CLOTH_B)
-	var bow_c := at + Vector3(0.17, leg + torso * 0.72, 0.13)
-	for k in 5:
-		var a := -0.95 + 1.9 * float(k) / 4.0
-		var p0 := bow_c + Vector3(0, cos(a) * 0.26, sin(a) * 0.26)
-		var p1 := bow_c + Vector3(0, cos(a + 0.47) * 0.26, sin(a + 0.47) * 0.26)
-		s.beam(p0, p1, 0.011, 0.011, 3, WOOD_D)
-	s.cyl(at + Vector3(-0.08, leg + torso * 0.75, -0.13), 0.045, 0.05, 0.2, Color("5a3a22"), 6)
-	s.instance(parent, "archer")
+func _start_construction(fx_node: Node, audio_node: Node) -> void:
+	clear_visuals(fx_node)
+	building = true
+	build_t = 0.0
+	build_dur = 0.92 + float(level) * 0.14
 
-# ---------------------------------------------------------------- 臼炮
+	var bp := _build_blueprint(kind, level, _rng)
+	mounts = bp["mounts"]
+	_static_soup = Soup.new()
 
-func _build_bombard() -> void:
-	var l := lvl
-	var rr: float = [1.0, 1.08, 1.15][l]
-	var h: float = [1.1, 1.5, 1.9][l]
-	var s := Soup.new()
-	s.cyl(Vector3(0, 0.13, 0), rr + 0.26, rr + 0.18, 0.26, STONE_D, 12, 0.0, 0.5, 0.95)
-	if l == 2:
-		s.cyl(Vector3(0, 0.36, 0), rr + 0.14, rr + 0.1, 0.2, STONE, 12)
-	# 石鼓塔身 + 砌层压条
-	s.cyl(Vector3(0, h * 0.5 + 0.1, 0), rr, rr * 0.93, h, STONE, 12, 0.0, 0.55, 1.0)
-	for c in 2 + l:
-		var yy := 0.36 + float(c) * (h - 0.55) / float(1.5 + float(l))
-		var r3 := rr * (1.0 - 0.05 * (0.5 + float(c)) / float(2 + l)) + 0.012
-		s.cyl(Vector3(0, yy, 0), r3, r3, 0.15, STONE_D, 12, 0.0, 0.8, 0.95)
-	s.box(Vector3(0, 0.42, rr * 0.96), Vector3(0.36, 0.58, 0.12), Color("0a0806"))
-	if l >= 1:
-		for k in 4:
-			var a := float(k) * PI * 0.5 + PI * 0.25
-			s.beam(Vector3(cos(a) * (rr + 0.02), 0.3, sin(a) * (rr + 0.02)), Vector3(cos(a) * (rr + 0.06), h * 0.85, sin(a) * (rr + 0.06)), 0.19, 0.16, 4, STONE_D, 0.0, 0.5, 0.95)
-			s.box(Vector3(cos(a) * (rr + 0.06), h * 0.9, sin(a) * (rr + 0.06)), Vector3(0.36, 0.14, 0.46), STONE_L, Basis(Vector3.UP, -a))
-	# 平台 + 木板 + 城垛
-	s.cyl(Vector3(0, h + 0.14, 0), rr * 0.95 + 0.16, rr * 0.95 + 0.1, 0.18, STONE_L, 12)
-	s.planks(Vector3(0, h + 0.24, 0), rr * 1.5, rr * 1.5, 5, 0.05, WOOD, Basis.IDENTITY, 0.03)
-	for k in 12:
-		if k % 4 == 0:
-			continue
-		var a := (float(k) + 0.5) / 12.0 * TAU
-		s.box(Vector3(cos(a) * rr * 0.94, h + 0.42, sin(a) * rr * 0.94), Vector3(0.5, 0.34, 0.26), STONE_L, Basis(Vector3.UP, -a + PI * 0.5), 0.6, 1.0)
-	# 炮车
-	var tur := Node3D.new()
-	tur.position = Vector3(0, h + 0.3, 0)
-	body.add_child(tur)
-	turret = tur
-	var ts := Soup.new()
-	var blen: float = [0.95, 1.12, 1.25][l]
-	var gr: float = [0.15, 0.18, 0.215][l]
-	ts.beam(Vector3(0, 0.02, 0), Vector3(0, 0.06, blen), gr * 1.25, gr, 10, IRON, 0.0, 0.72, 1.0)
-	ts.cyl(Vector3(0, 0.05, blen - 0.05), gr * 1.52, gr * 1.52, 0.13, IRON, 10, 0.0, 0.6, 0.95)
-	ts.sphere(Vector3(0, 0.03, -0.02), gr * 1.35, IRON, 8, 5, Vector3(1, 0.9, 1), 0.55, 0.95)
-	for k in 3:
-		ts.cyl(Vector3(0, 0.06, 0.2 + float(k) * (blen - 0.42) / 2.0), gr * 1.32, gr * 1.32, 0.05, Color("6a6e76"), 10)
-	for sx in [-1.0, 1.0]:
-		ts.cyl(Vector3(sx * (gr + 0.04), 0.02, 0.26), 0.06, 0.06, 0.14, IRON, 6, 0.0, 0.6, 0.9)
-	ts.instance(tur, "barrel")
-	# 弹药与火药桶
-	var base_y := h + 0.3
-	s.sphere(Vector3(-0.44, base_y + 0.06, -0.44), 0.1, Color("2e3038"), 7, 4, Vector3.ONE, 0.5)
-	s.sphere(Vector3(-0.2, base_y + 0.05, -0.5), 0.1, Color("2e3038"), 7, 4, Vector3.ONE, 0.5)
-	s.sphere(Vector3(-0.33, base_y + 0.2, -0.43), 0.1, Color("2e3038"), 7, 4, Vector3.ONE, 0.5)
-	var barrel := Vector3(0.5, base_y, -0.52)
-	s.cyl(barrel, 0.16, 0.14, 0.42, Color("6a4a2c"), 8, 0.0, 0.5, 0.9)
-	for yv in [-0.12, 0.12]:
-		s.cyl(barrel + Vector3(0, yv, 0), 0.168, 0.168, 0.04, IRON, 8)
-	# 灯笼
-	var lx := -rr * 0.82
-	s.beam(Vector3(lx, h + 0.14, 0.2), Vector3(lx, h + 1.3, 0.2), 0.042, 0.032, 5, IRON)
-	s.beam(Vector3(lx, h + 1.3, 0.2), Vector3(lx, h + 1.3, 0.54), 0.028, 0.028, 4, IRON)
-	s.box(Vector3(lx, h + 1.19, 0.54), Vector3(0.22, 0.05, 0.22), IRON)
-	s.box(Vector3(lx, h + 1.05, 0.54), Vector3(0.15, 0.22, 0.15), Color("ffcf8a"), Basis.IDENTITY, 0.95, 1.0)
-	s.box(Vector3(lx, h + 0.92, 0.54), Vector3(0.22, 0.05, 0.22), IRON)
-	_torch(Vector3(lx, h + 1.05, 0.54), 0.2)
-	s.instance(body, "mesh")
-
-# ---------------------------------------------------------------- 雷塔
-
-func _build_spire() -> void:
-	var l := lvl
-	var h: float = [2.7, 3.4, 4.1][l]
-	var s := Soup.new()
-	s.box(Vector3(0, 0.11, 0), Vector3(1.6, 0.22, 1.6), BASALT_L, Basis.IDENTITY, 0.5, 0.9)
-	s.box(Vector3(0, 0.31, 0), Vector3(1.2, 0.18, 1.2), BASALT)
-	if l >= 1:
-		for ax in [-1.0, 1.0]:
-			for az in [-1.0, 1.0]:
-				s.cone(Vector3(ax * 0.6, 0.3, az * 0.6), 0.17, 0.55, BASALT_L, 4, PI * 0.25, 0.5)
-	# 八棱渐缩塔身
-	s.cyl(Vector3(0, 0.4 + (h - 0.42) * 0.5, 0), 0.62, 0.34, h - 0.42, BASALT, 8, PI * 0.125, 0.45, 1.0)
-	# 扶壁
-	for k in 4:
-		var a := float(k) * PI * 0.5 + PI * 0.25
-		s.beam(Vector3(cos(a) * 0.56, 0.34, sin(a) * 0.56), Vector3(cos(a) * 0.46, h * 0.42, sin(a) * 0.46), 0.16, 0.1, 4, BASALT_L, 0.0, 0.55, 0.95)
-	# 符文
-	for k in 4:
-		var a := float(k) * PI * 0.5 + PI * 0.25
-		for j in 3 + l:
-			var u := (float(j) + 0.7) / float(3 + l) * 0.82
-			var yy := 0.44 + u * (h - 0.5)
-			var rad := lerpf(0.62, 0.34, u) * 0.93
-			s.box(Vector3(cos(a) * rad, yy, sin(a) * rad), Vector3(0.1, 0.22, 0.035), Color("7fd8ff"), Basis(Vector3.UP, -a + PI * 0.5), 1.0, 1.0)
-	# 铜箍
-	if l >= 1:
-		var us: Array = [0.3, 0.58, 0.82] if l == 2 else [0.4, 0.75]
-		for u in us:
-			var rr := lerpf(0.62, 0.34, float(u)) + 0.028
-			s.cyl(Vector3(0, 0.4 + float(u) * (h - 0.42), 0), rr, rr, 0.1, COPPER, 8, PI * 0.125, 0.6, 0.95)
-	# 顶部爪
-	for k in 4:
-		var a := float(k) * PI * 0.5 + PI * 0.25
-		s.beam(Vector3(cos(a) * 0.24, h - 0.1, sin(a) * 0.24), Vector3(cos(a) * 0.44, h + 0.3, sin(a) * 0.44), 0.07, 0.05, 4, BASALT_L)
-		s.beam(Vector3(cos(a) * 0.44, h + 0.3, sin(a) * 0.44), Vector3(cos(a) * 0.23, h + 0.8, sin(a) * 0.23), 0.05, 0.012, 4, COPPER if l > 0 else BASALT_L)
-	s.cyl(Vector3(0, h - 0.02, 0), 0.36, 0.3, 0.12, BASALT_L, 8, PI * 0.125)
-	# 环绕的悬浮碎片
-	var cs: float = [0.2, 0.24, 0.29][l]
-	var shard_count: int = [0, 2, 4][l]
-	for k in shard_count:
-		var pivot := Node3D.new()
-		var a := TAU * float(k) / float(maxi(1, shard_count)) + 0.4
-		pivot.position = Vector3(cos(a) * 0.52, h + 0.55, sin(a) * 0.52)
-		body.add_child(pivot)
-		var ss := Soup.new()
-		ss.beam(Vector3(0, -0.14, 0), Vector3(0, 0.18, 0), 0.052, 0.002, 5, CRYSTAL, 0.0, 0.8, 1.0)
-		ss.instance(pivot, "shard")
-		_shards.append({"node": pivot, "spin": 0.55 + float(k) * 0.22, "y": h + 0.55, "ph": float(k) * 1.7})
-	# 会转的水晶簇
-	var tur := Node3D.new()
-	tur.position = Vector3(0, h + 0.42, 0)
-	body.add_child(tur)
-	turret = tur
-	var tn := Soup.new()
-	for k in 3:
-		var a := TAU * float(k) / 3.0
-		tn.beam(Vector3(cos(a) * 0.11, -0.06, sin(a) * 0.11), Vector3(cos(a) * 0.06, cs * 1.35, sin(a) * 0.06), cs * 0.6, 0.008, 5, CRYSTAL, 0.0, 0.9, 1.0)
-	tn.sphere(Vector3(0, 0.01, 0), cs * 0.62, Color("bff0ff"), 8, 5, Vector3(1, 1.25, 1), 1.0, 1.0)
-	tn.instance(tur, "crystal")
-	var glow := OmniLight3D.new()
-	glow.light_color = Color("7fd8ff")
-	glow.light_energy = 1.7
-	glow.omni_range = 4.6
-	tur.add_child(glow)
-	_lights.append(glow)
-	s.instance(body, "mesh")
-
-# ---------------------------------------------------------------- 哨所
-
-func _build_guard() -> void:
-	var l := lvl
-	var w: float = [1.5, 1.7, 1.9][l]
-	var d: float = [1.3, 1.4, 1.5][l]
-	var wh: float = [1.05, 1.25, 1.5][l]
-	var stone_walls := l == 2
-	var s := Soup.new()
-	# 地台 + 台阶
-	s.box(Vector3(0, 0.09, 0.1), Vector3(w + 0.55, 0.18, d + 0.75), STONE_D, Basis.IDENTITY, 0.5, 0.9)
-	s.box(Vector3(0, 0.05, d * 0.5 + 0.56), Vector3(0.78, 0.1, 0.42), STONE)
-	if l == 1:
-		s.box(Vector3(0, 0.36, 0), Vector3(w + 0.08, 0.36, d + 0.08), STONE, Basis.IDENTITY, 0.55, 1.0)
-	# 墙体
-	var wall_c := STONE_L if stone_walls else Color("8f7a5c")
-	s.box(Vector3(0, 0.18 + wh * 0.5, 0), Vector3(w, wh, d), wall_c, Basis.IDENTITY, 0.55, 1.0)
-	if stone_walls:
-		for k in 4:
-			s.box(Vector3(0, 0.28 + float(k) * wh / 4.2, d * 0.5 + 0.012), Vector3(w * 0.97, 0.035, 0.03), STONE_D)
-			s.box(Vector3(0, 0.28 + float(k) * wh / 4.2, -d * 0.5 - 0.012), Vector3(w * 0.97, 0.035, 0.03), STONE_D)
-	else:
-		var cols := int(w / 0.24)
-		for i in cols:
-			var x := -w * 0.5 + 0.12 + float(i) * 0.24
-			s.box(Vector3(x, 0.18 + wh * 0.5, d * 0.5 + 0.02), Vector3(0.2, wh * 0.98, 0.03), WOOD if i % 2 == 0 else WOOD_L)
-			s.box(Vector3(x, 0.18 + wh * 0.5, -d * 0.5 - 0.02), Vector3(0.2, wh * 0.98, 0.03), WOOD if i % 2 == 0 else WOOD_L)
-		for sg in [-1.0, 1.0]:
-			s.box(Vector3(sg * w * 0.5, 0.18 + wh * 0.55, 0), Vector3(0.04, wh * 0.98, d), WOOD_L)
-		for yy in [0.18 + wh * 0.3, 0.18 + wh * 0.75]:
-			s.box(Vector3(0, yy, d * 0.5 + 0.03), Vector3(w + 0.05, 0.08, 0.03), WOOD_D)
-			s.box(Vector3(0, yy, -d * 0.5 - 0.03), Vector3(w + 0.05, 0.08, 0.03), WOOD_D)
-	# 门框、门板、门轴、踏石
-	s.box(Vector3(0, 0.58, d * 0.5 + 0.02), Vector3(0.5, 0.82, 0.06), Color("2a2018"))
-	s.box(Vector3(0, 1.0, d * 0.5 + 0.03), Vector3(0.66, 0.09, 0.1), WOOD_D)
-	for sg in [-1.0, 1.0]:
-		s.box(Vector3(sg * 0.29, 0.6, d * 0.5 + 0.04), Vector3(0.1, 0.9, 0.1), WOOD_D)
-	for yy in [0.45, 0.78]:
-		s.box(Vector3(0.13, yy, d * 0.5 + 0.06), Vector3(0.1, 0.05, 0.04), IRON)
-	# 窗与铁栏
-	s.box(Vector3(w * 0.32, 0.18 + wh * 0.62, d * 0.5 + 0.02), Vector3(0.26, 0.26, 0.05), Color("0a0806"))
-	for k in 2:
-		s.box(Vector3(w * 0.32, 0.18 + wh * 0.62 + (float(k) - 0.5) * 0.12, d * 0.5 + 0.05), Vector3(0.26, 0.02, 0.02), WOOD_D)
-	# 屋顶：檐板 + 两坡瓦垄 + 屋脊
-	var ry := 0.18 + wh
-	s.box(Vector3(0, ry + 0.07, 0), Vector3(w + 0.5, 0.14, d + 0.5), WOOD_L, Basis.IDENTITY, 0.7, 1.0)
-	for side in [-1.0, 1.0]:
-		var basis := Basis(Vector3.RIGHT, -side * 0.6)
-		var mid := Vector3(0, ry + 0.3, side * (d * 0.5 + 0.1))
-		for k in 3:
-			s.box(mid + Vector3(0, 0.055 * float(k), side * 0.13 * float(k)), Vector3(w + 0.62 - 0.1 * float(k), 0.1, 0.4), WOOD_D if k % 2 == 0 else WOOD, basis, 0.65, 1.0)
-		s.beam(Vector3(-w * 0.5 - 0.3, ry + 0.14, side * 0.18), Vector3(w * 0.5 + 0.3, ry + 0.14, side * 0.18), 0.045, 0.045, 4, WOOD_D)
-	s.beam(Vector3(0, ry + 0.05, -d * 0.5 - 0.26), Vector3(0, ry + 0.8, 0), 0.07, 0.05, 4, WOOD_D)
-	s.box(Vector3(0, ry + 0.62, 0.01), Vector3(0.14, 0.18, 0.14), IRON)
-	# 旗
-	s.beam(Vector3(w * 0.44, ry + 0.1, -d * 0.44), Vector3(w * 0.44, ry + 1.4, -d * 0.44), 0.038, 0.028, 5, WOOD_D)
-	s.box(Vector3(w * 0.44 - 0.22, ry + 1.16, -d * 0.44), Vector3(0.44, 0.3, 0.02), CLOTH_B, Basis.IDENTITY, 0.85, 1.0)
-	# 门边挂盾
-	var shield_c := Vector3(-w * 0.62, 0.62, d * 0.5 + 0.01)
-	s.sphere(shield_c, 0.2, Color("6a3a2e"), 9, 5, Vector3(1.0, 1.15, 0.35), 0.85, 1.0)
-	s.box(shield_c + Vector3(0, 0, 0.07), Vector3(0.05, 0.3, 0.03), IRON)
-	# 火盆
-	var bpos := Vector3(-w * 0.36, ry + 0.18, -d * 0.3)
-	s.cyl(bpos + Vector3(0, 0.14, 0), 0.15, 0.22, 0.2, IRON, 8, 0.0, 0.6)
-	s.sphere(bpos + Vector3(0, 0.3, 0), 0.17, EMBER, 6, 3, Vector3(1, 0.5, 1), 0.9)
-	_torch(bpos + Vector3(0, 0.46, 0), 0.2)
-	s.instance(body, "mesh")
-
-# ---------------------------------------------------------------- 步兵
-
-func _spawn_footmen() -> void:
-	for f in footmen:
-		if is_instance_valid(f["node"]):
-			f["node"].queue_free()
-	footmen.clear()
-	var count: int = int(def["count"][lvl])
-	var hp: float = float(def["hp"][lvl])
-	for i in count:
-		var n := Node3D.new()
-		add_child(n)
-		var a := TAU * float(i) / float(count)
-		n.position = Vector3(cos(a) * 0.62, 0, sin(a) * 0.62)
-		n.scale = Vector3(0.74, 0.74, 0.74)
-		var s := Soup.new()
-		# 腿
-		for sx in [-1.0, 1.0]:
-			s.beam(Vector3(sx * 0.075, 0.52, 0), Vector3(sx * 0.085, 0.0, 0.03), 0.055, 0.048, 4, Color("3a3430"))
-			s.box(Vector3(sx * 0.085, 0.03, 0.05), Vector3(0.13, 0.07, 0.2), Color("2a2422"))
-		# 躯干 + 罩袍 + 腰带
-		s.beam(Vector3(0, 0.5, 0), Vector3(0, 0.97, 0), 0.135, 0.115, 6, CLOTH_B)
-		s.box(Vector3(0, 0.66, 0), Vector3(0.29, 0.34, 0.2), Color("6a3a2e"), Basis.IDENTITY, 0.8, 1.0)
-		s.box(Vector3(0, 0.52, 0), Vector3(0.3, 0.07, 0.21), Color("2a2018"))
-		# 头 + 头盔 + 鼻梁护
-		s.sphere(Vector3(0, 1.07, 0), 0.105, SKIN, 8, 5)
-		s.sphere(Vector3(0, 1.09, 0), 0.128, Color("8a929e"), 9, 5, Vector3(1.05, 0.75, 1.05), 0.8, 1.0)
-		s.box(Vector3(0, 1.07, 0.09), Vector3(0.035, 0.16, 0.05), IRON)
-		s.box(Vector3(0, 1.02, -0.13), Vector3(0.16, 0.1, 0.03), Color("6a3a2e"))
-		# 盾
-		var sh := Soup.new()
-		sh.sphere(Vector3.ZERO, 0.19, Color("7a4a36"), 9, 5, Vector3(1.0, 1.2, 0.32), 0.85, 1.0)
-		sh.box(Vector3(0, 0, 0.05), Vector3(0.05, 0.28, 0.02), IRON)
-		var shi := sh.instance(n, "shield")
-		shi.position = Vector3(-0.23, 0.72, 0.07)
-		shi.rotation = Vector3(0, 0.25, 0)
-		# 剑（以手为枢轴，挥击动画在 game.gd 里转 rotation.x）
-		var sw := Soup.new()
-		sw.beam(Vector3(0, 0, 0), Vector3(0.02, 0.44, 0.06), 0.022, 0.016, 4, Color("c8d0d8"))
-		sw.box(Vector3(0, 0, 0), Vector3(0.13, 0.045, 0.05), IRON)
-		sw.box(Vector3(0, -0.09, 0), Vector3(0.04, 0.14, 0.045), Color("3a2a20"))
-		var sword := sw.instance(n, "sword")
-		sword.position = Vector3(0.2, 0.74, 0.06)
-		var cape := Soup.new()
-		cape.box(Vector3(0, 0.68, -0.14), Vector3(0.28, 0.52, 0.035), CLOTH_B.darkened(0.3), Basis.IDENTITY, 0.7, 1.0)
-		cape.instance(n, "cape")
-		footmen.append({
-			"node": n, "hp": hp, "max_hp": hp, "cd": 0.0, "target": null,
-			"home": n.position, "sword": sword, "alive": true, "regen": 0.0,
+	var piece_soups: Array = bp["pieces"]
+	var n := piece_soups.size()
+	for i in n:
+		var sp: Soup = piece_soups[i]
+		_static_soup.merge(sp)
+		var mi := sp.instance(self, "bp_%d" % i, TX.mat_world)
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		mi.visible = false
+		var t_start := (float(i) / float(maxi(1, n))) * (build_dur * 0.68)
+		_pieces_data.append({
+			"mi": mi,
+			"start": t_start,
+			"dur": 0.24,
+			"drop": 2.4 + float(i) * 0.35,
+			"landed": false,
 		})
 
-func footmen_alive() -> int:
-	var c := 0
-	for f in footmen:
-		if f["alive"]:
-			c += 1
-	return c
+	# Build wooden scaffolding cage around the tower
+	var sc_sp := _build_scaffold(float(mounts.get("height", 3.2)))
+	_scaffold_mi = sc_sp.instance(self, "scaffold", TX.mat_world)
+	_scaffold_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	_scaffold_mi.scale = Vector3(1.0, 0.01, 1.0)
+
+	# Build animated sub-parts (hidden until build finishes)
+	_build_dynamic_parts(bp)
+
+	# Build Frost Jotun stun ice shell (hidden unless stun > 0)
+	var ice_sp := Soup.new()
+	var C := Soup.COL()
+	var th := float(mounts.get("height", 3.2))
+	ice_sp.cyl(1.15, th * 0.85, 0, th * 0.42, 0, C["ice"], {"n": 6, "rt": 0.72, "l": TX.L_PLAIN, "rough": 0.18, "emis": 0.45})
+	freeze_mi = ice_sp.instance(self, "freeze_shell", TX.mat_world)
+	freeze_mi.visible = false
+	freeze_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	# Prepare archer sentry animation states
+	archer_anim.clear()
+	for _ap in mounts.get("archers", []):
+		archer_anim.append({"yaw": 0.0, "draw": 0.0, "fire_cd": 0.0})
+
+	if fx_node != null:
+		fx_node.fx_dust(global_position.x, global_position.y, global_position.z, 7, 1.0, 0x8a7860)
+	if audio_node != null:
+		audio_node.play_sfx("hammer", 0.0, 0.85)
+
+
+func _build_dynamic_parts(bp: Dictionary) -> void:
+	if kind == "bombard" and bp.has("turret_soup"):
+		turret_node = Node3D.new()
+		turret_node.name = "bombard_turret"
+		turret_node.position = mounts["turret_pivot"]
+		turret_node.visible = false
+		add_child(turret_node)
+		var tmi: MeshInstance3D = bp["turret_soup"].instance(turret_node, "carriage", TX.mat_world)
+		tmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+		barrel_node = Node3D.new()
+		barrel_node.name = "bombard_barrel"
+		barrel_node.position = Vector3(0.0, 0.24, 0.0)
+		turret_node.add_child(barrel_node)
+		var bmi: MeshInstance3D = bp["barrel_soup"].instance(barrel_node, "barrel", TX.mat_world)
+		bmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+	elif kind == "spire" and bp.has("crystal_soup"):
+		crystal_node = Node3D.new()
+		crystal_node.name = "spire_crystal"
+		crystal_node.position = mounts["crystal_pivot"]
+		crystal_node.visible = false
+		add_child(crystal_node)
+		var cmi: MeshInstance3D = bp["crystal_soup"].instance(crystal_node, "crystal", TX.mat_world)
+		cmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+		if bp.has("ring_soup"):
+			ring_node = Node3D.new()
+			ring_node.name = "spire_ring"
+			ring_node.position = mounts["crystal_pivot"]
+			ring_node.visible = false
+			add_child(ring_node)
+			var rmi: MeshInstance3D = bp["ring_soup"].instance(ring_node, "ring", TX.mat_world)
+			rmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+
+func _finish_construction(fx_node: Node, audio_node: Node) -> void:
+	building = false
+	for pd in _pieces_data:
+		var mi: MeshInstance3D = pd["mi"]
+		if is_instance_valid(mi):
+			mi.queue_free()
+	_pieces_data.clear()
+	if is_instance_valid(_scaffold_mi):
+		_scaffold_mi.queue_free()
+		_scaffold_mi = null
+
+	# Commit single merged static mesh for optimal draw calls
+	if _static_soup != null:
+		_static_mi = _static_soup.instance(self, "tower_static", TX.mat_world)
+		_static_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		_static_soup = null
+
+	if turret_node != null:
+		turret_node.visible = true
+	if crystal_node != null:
+		crystal_node.visible = true
+	if ring_node != null:
+		ring_node.visible = true
+
+	# Ignite tower flames!
+	if fx_node != null:
+		var base_p := global_position
+		var f_col := Color(0.55, 0.85, 1.2) if kind == "spire" else Color(1.0, 0.90, 0.72)
+		var f_scale := 0.52 + float(level) * 0.14
+		for fp in mounts.get("flames", []):
+			var wp: Vector3 = base_p + fp
+			var fh: Dictionary = fx_node.add_flame(wp.x, wp.y, wp.z, f_scale, {
+				"tint": f_col,
+				"smoke": 0.12 if kind == "spire" else 0.42,
+				"ember": 0.35,
+				"halo": 0.42,
+				"owner": self,
+			})
+			fh["local_pos"] = fp
+			flame_handles.append(fh)
+		fx_node.fx_dust(base_p.x, base_p.y + 0.2, base_p.z, 10, 1.15, 0x928068)
+		fx_node.fx_sparks(base_p.x, base_p.y + float(mounts.get("height", 3.0)) * 0.65, base_p.z, 10, 3.2, 0xffd078, 1.0)
+	if audio_node != null:
+		audio_node.play_sfx("buildDone", 0.0, 0.9)
+
+
+func update_visuals(dt: float, t: float, fx_node: Node, audio_node: Node) -> void:
+	# Keep attached flames synced with tower world transform (e.g., during crumble!)
+	if flame_handles.size() > 0:
+		var xf := global_transform
+		for fh in flame_handles:
+			var lp: Vector3 = fh["local_pos"]
+			var wp := xf * lp
+			fh["x"] = wp.x
+			fh["y"] = wp.y
+			fh["z"] = wp.z
+
+	if building:
+		build_t += dt
+		var u_sc := clampf(build_t / 0.25, 0.0, 1.0)
+		if _scaffold_mi != null:
+			var sc_y := U.ease_out_back(u_sc)
+			if build_t > build_dur - 0.18:
+				sc_y *= clampf((build_dur - build_t) / 0.18, 0.0, 1.0)
+			_scaffold_mi.scale = Vector3(1.0, maxf(0.01, sc_y), 1.0)
+
+		for pd in _pieces_data:
+			var pt := build_t - float(pd["start"])
+			var mi: MeshInstance3D = pd["mi"]
+			if pt < 0.0:
+				continue
+			mi.visible = true
+			var pu := clampf(pt / float(pd["dur"]), 0.0, 1.0)
+			var y_off := (1.0 - U.ease_in(pu)) * float(pd["drop"])
+			mi.position.y = y_off
+			if pu >= 1.0 and not bool(pd["landed"]):
+				pd["landed"] = true
+				if fx_node != null:
+					fx_node.fx_dust(global_position.x, global_position.y + 0.3, global_position.z, 3, 0.75, 0x8a7a64)
+				if audio_node != null:
+					audio_node.play_sfx("hammer", 0.0, 0.65, 0.9 + randf() * 0.25)
+			elif pu >= 1.0:
+				# Subtle landing squash recovery
+				var bt := pt - float(pd["dur"])
+				if bt < 0.14:
+					var s := 1.0 + sin((bt / 0.14) * PI) * 0.08
+					mi.scale = Vector3(s, 1.0 / s, s)
+				else:
+					mi.scale = Vector3.ONE
+
+		if build_t >= build_dur:
+			_finish_construction(fx_node, audio_node)
+		return
+
+	# Stun (Frost Jotun freeze)
+	if stun > 0.0:
+		stun = maxf(0.0, stun - dt)
+		if freeze_mi != null:
+			freeze_mi.visible = true
+			freeze_mi.scale = Vector3.ONE * (0.96 + 0.04 * sin(t * 8.0))
+	else:
+		if freeze_mi != null:
+			freeze_mi.visible = false
+
+	# Bombard turret yaw & recoil recovery
+	if turret_node != null:
+		turret_node.rotation.y = U.ang_damp(turret_node.rotation.y, aim_yaw, 7.5, dt)
+	if barrel_node != null:
+		recoil = maxf(0.0, recoil - dt * 3.6)
+		barrel_node.position.z = -recoil * 0.34
+		barrel_node.rotation.x = -0.32 - recoil * 0.18
+
+	# Storm Spire levitating crystal + counter-rotating rune ring + idle electric sparks
+	if crystal_node != null:
+		var spd := 1.5 + float(level) * 0.5 + charge_t * 5.0
+		crystal_node.rotation.y += dt * spd
+		var base_cp: Vector3 = mounts["crystal_pivot"]
+		crystal_node.position.y = base_cp.y + sin(t * 2.8 + float(pad_idx)) * 0.16
+		var cscale := 1.0 + charge_t * 0.22
+		crystal_node.scale = Vector3.ONE * cscale
+	if ring_node != null:
+		ring_node.rotation.y -= dt * (1.1 + float(level) * 0.35 + charge_t * 3.0)
+		ring_node.rotation.x = sin(t * 1.6 + float(pad_idx)) * 0.18
+		ring_node.rotation.z = cos(t * 1.3 + float(pad_idx)) * 0.14
+
+	# Archer sentries draw decay
+	for aa in archer_anim:
+		aa["draw"] = maxf(0.0, float(aa["draw"]) - dt * 3.0)
+
+
+func get_light_info(t: float) -> Dictionary:
+	if building or stun > 0.0:
+		return {}
+	var base_p := global_position
+	var h := float(mounts.get("height", 3.2))
+	var flk := 0.88 + 0.12 * sin(t * 13.0 + float(pad_idx) * 2.3)
+	if kind == "spire":
+		return {
+			"pos": base_p + Vector3(0.0, h + 0.4, 0.0),
+			"col": Color(0.45, 0.82, 1.0),
+			"inten": (2.2 + float(level) * 0.85 + charge_t * 3.0) * flk,
+			"range": 14.5 + float(level) * 2.0,
+		}
+	return {
+		"pos": base_p + Vector3(0.0, h + 0.35, 0.0),
+		"col": Color(1.0, 0.56, 0.18),
+		"inten": (2.0 + float(level) * 0.75) * flk,
+		"range": 13.5 + float(level) * 2.0,
+	}
+
+
+# ============================================================================
+# Scaffolding Frame Builder
+# ============================================================================
+
+static func _build_scaffold(h: float) -> Soup:
+	var sp := Soup.new()
+	var C := Soup.COL()
+	var r := 1.18
+	for sx in [-r, r]:
+		for sz in [-r, r]:
+			sp.box(0.08, h + 0.4, 0.08, sx, (h + 0.4) * 0.5, sz, C["woodL"], {"l": TX.L_WOOD})
+	var levels := maxi(2, int(h / 1.1))
+	for i in levels:
+		var y := 0.55 + float(i) * (h / float(levels))
+		for sz in [-r, r]:
+			sp.box(r * 2.08, 0.07, 0.07, 0, y, sz, C["wood"], {"l": TX.L_WOOD})
+		for sx in [-r, r]:
+			sp.box(0.07, 0.07, r * 2.08, sx, y, 0, C["wood"], {"l": TX.L_WOOD})
+		sp.seg(Vector3(-r, y - 0.5, r), Vector3(r, y + 0.4, r), 0.035, 0.035, C["woodD"], {"l": TX.L_WOOD, "n": 4})
+		sp.seg(Vector3(-r, y + 0.4, -r), Vector3(r, y - 0.5, -r), 0.035, 0.035, C["woodD"], {"l": TX.L_WOOD, "n": 4})
+	return sp
+
+
+# ============================================================================
+# Detailed 4 x 3 Tower Blueprints (archer, bombard, spire, guard)
+# ============================================================================
+
+static func _build_blueprint(p_kind: String, lvl: int, rng: U.Rng) -> Dictionary:
+	var C := Soup.COL()
+	var pieces: Array = []
+	var flames: Array[Vector3] = []
+	var archers: Array[Vector3] = []
+	var res: Dictionary = {"pieces": pieces}
+
+	if p_kind == "archer":
+		var h := 2.6 + float(lvl) * 0.72
+		# Piece 0: Stone base plinth
+		var p0 := Soup.new()
+		p0.box(1.75, 0.55, 1.75, 0, 0.27, 0, C["stoneD"], {"l": TX.L_MASON, "uvs": 0.45})
+		pieces.append(p0)
+
+		# Piece 1: Timber / masonry watchtower shaft
+		var p1 := Soup.new()
+		if lvl == 0:
+			for sx in [-0.62, 0.62]:
+				for sz in [-0.62, 0.62]:
+					p1.box(0.18, h, 0.18, sx, 0.55 + h * 0.5, sz, C["woodD"], {"l": TX.L_WOOD})
+			p1.seg(Vector3(-0.62, 0.6, 0.62), Vector3(0.62, 0.55 + h, 0.62), 0.06, 0.06, C["wood"], {"l": TX.L_WOOD})
+			p1.seg(Vector3(0.62, 0.6, -0.62), Vector3(-0.62, 0.55 + h, -0.62), 0.06, 0.06, C["wood"], {"l": TX.L_WOOD})
+			p1.box(1.15, h * 0.5, 1.15, 0, 0.55 + h * 0.25, 0, C["wood"], {"l": TX.L_WOOD})
+		else:
+			p1.box(1.42, h, 1.42, 0, 0.55 + h * 0.5, 0, C["stone"] if lvl == 1 else C["stoneL"], {"l": TX.L_MASON, "uvs": 0.45})
+			for sx in [-0.74, 0.74]:
+				for sz in [-0.74, 0.74]:
+					p1.box(0.24, h + 0.1, 0.24, sx, 0.55 + h * 0.5, sz, C["stoneD"], {"l": TX.L_MASON})
+		pieces.append(p1)
+
+		# Piece 2: Overhanging wooden fighting deck & crenellated parapet
+		var dy := 0.55 + h
+		var p2 := Soup.new()
+		var dw := 1.85 + float(lvl) * 0.22
+		p2.box(dw, 0.24, dw, 0, dy, 0, C["wood"], {"l": TX.L_WOOD})
+		var hw := dw * 0.46
+		for sx in [-hw, hw]:
+			p2.box(0.16, 0.58, dw, sx, dy + 0.38, 0, C["stoneD"] if lvl > 0 else C["woodD"], {"l": TX.L_MASON if lvl > 0 else TX.L_WOOD})
+		for sz in [-hw, hw]:
+			p2.box(dw, 0.58, 0.16, 0, dy + 0.38, sz, C["stoneD"] if lvl > 0 else C["woodD"], {"l": TX.L_MASON if lvl > 0 else TX.L_WOOD})
+		# Corner torch braziers
+		for sx in [-hw, hw]:
+			p2.cyl(0.15, 0.20, sx, dy + 0.78, hw, C["iron"], {"n": 6, "rt": 1.25, "l": TX.L_METAL})
+			flames.append(Vector3(sx, dy + 0.90, hw))
+		if lvl >= 1:
+			p2.cloth_panel({"x0": -0.28, "x1": 0.28, "y_top": dy - 0.1, "len": 1.15, "z": hw + 0.14, "col": C["clothB"], "col2": C["gold"], "rng": rng, "sway": 0.85})
+		pieces.append(p2)
+
+		# Piece 3: Pitched roof canopy (Lvl 1 & 2)
+		if lvl >= 1:
+			var p3 := Soup.new()
+			for sx in [-hw + 0.08, hw - 0.08]:
+				for sz in [-hw + 0.08, hw - 0.08]:
+					p3.box(0.12, 1.32, 0.12, sx, dy + 0.78, sz, C["woodD"], {"l": TX.L_WOOD})
+			p3.cone(dw * 0.78, 1.15 + float(lvl) * 0.22, 0, dy + 1.92, 0, C["slate"], {"n": 4, "r": Vector3(0, PI * 0.25, 0), "l": TX.L_SLATE, "uvs": 0.75})
+			if lvl == 2:
+				p3.cyl(0.05, 0.65, 0, dy + 2.85, 0, C["gold"], {"n": 6, "l": TX.L_METAL, "rough": 0.35})
+			pieces.append(p3)
+
+		if lvl == 0:
+			archers.append(Vector3(0.0, dy + 0.14, 0.0))
+		elif lvl == 1:
+			archers.append(Vector3(-0.36, dy + 0.14, 0.12))
+			archers.append(Vector3(0.36, dy + 0.14, -0.12))
+		else:
+			archers.append(Vector3(-0.42, dy + 0.14, 0.22))
+			archers.append(Vector3(0.42, dy + 0.14, 0.22))
+			archers.append(Vector3(0.0, dy + 0.14, -0.38))
+
+		res["mounts"] = {"flames": flames, "archers": archers, "fire_pos": Vector3(0, dy + 0.95, 0), "height": dy + (2.0 if lvl >= 1 else 1.0)}
+
+	elif p_kind == "bombard":
+		var h := 1.45 + float(lvl) * 0.38
+		# Piece 0: Heavy fortified bastion base
+		var p0 := Soup.new()
+		p0.cyl(1.38, 0.65, 0, 0.32, 0, C["stoneD"], {"n": 8, "rt": 0.92, "l": TX.L_MASON, "uvs": 0.42})
+		pieces.append(p0)
+
+		# Piece 1: Thick masonry gun drum
+		var p1 := Soup.new()
+		p1.cyl(1.22, h, 0, 0.65 + h * 0.5, 0, C["stone"], {"n": 8, "rt": 0.96, "l": TX.L_MASON, "uvs": 0.45})
+		for i in 8:
+			var a := float(i) * PI * 0.25
+			p1.box(0.24, h * 0.85, 0.24, cos(a) * 1.18, 0.65 + h * 0.45, sin(a) * 1.18, C["stoneD"], {"l": TX.L_MASON, "r": Vector3(0, -a, 0)})
+		pieces.append(p1)
+
+		# Piece 2: Iron-banded deck + ammo cannonball stack + furnace glow
+		var dy := 0.65 + h
+		var p2 := Soup.new()
+		p2.cyl(1.32, 0.24, 0, dy, 0, C["iron"], {"n": 8, "l": TX.L_METAL, "rough": 0.48})
+		# Stacked black iron cannonballs on deck edge
+		for k in 3:
+			var a := float(k) * 0.52 + 1.8
+			p2.sph(0.14, cos(a) * 0.96, dy + 0.22, sin(a) * 0.96, C["iron"], {"w": 7, "h": 5, "l": TX.L_METAL, "rough": 0.38})
+		# Glowing coal pot beside mortar
+		p2.cyl(0.22, 0.24, -0.88, dy + 0.24, 0.62, C["iron"], {"n": 6, "rt": 1.2, "l": TX.L_METAL})
+		p2.cyl(0.16, 0.08, -0.88, dy + 0.36, 0.62, C["ember"], {"n": 6, "emis": 1.6})
+		flames.append(Vector3(-0.88, dy + 0.42, 0.62))
+		if lvl == 2:
+			p2.cyl(0.22, 0.24, 0.88, dy + 0.24, -0.62, C["iron"], {"n": 6, "rt": 1.2, "l": TX.L_METAL})
+			flames.append(Vector3(0.88, dy + 0.42, -0.62))
+		pieces.append(p2)
+
+		# Rotating turret carriage + recoiling heavy mortar barrel
+		var tur := Soup.new()
+		tur.box(0.86, 0.22, 1.05, 0, 0.12, 0, C["woodD"], {"l": TX.L_WOOD})
+		for sx in [-0.38, 0.38]:
+			tur.box(0.14, 0.46, 0.88, sx, 0.32, -0.05, C["wood"], {"l": TX.L_WOOD})
+			tur.cyl(0.22, 0.10, sx * 1.18, 0.20, 0.25, C["iron"], {"n": 8, "r": Vector3(0, 0, PI * 0.5), "l": TX.L_METAL})
+		res["turret_soup"] = tur
+
+		var bar := Soup.new()
+		var blen := 1.25 + float(lvl) * 0.24
+		var brad := 0.24 + float(lvl) * 0.045
+		bar.cyl(brad, blen, 0, 0.20, 0.22, C["iron"], {"n": 10, "rt": 0.84, "r": Vector3(PI * 0.5, 0, 0), "l": TX.L_METAL, "rough": 0.38})
+		bar.torus(brad * 0.94, 0, 0.20, 0.22 + blen * 0.46, C["brass"], {"n": 10, "t": 0.18, "l": TX.L_METAL, "rough": 0.34})
+		bar.torus(brad * 1.06, 0, 0.20, 0.22 - blen * 0.28, C["brass"], {"n": 10, "t": 0.16, "l": TX.L_METAL, "rough": 0.34})
+		if lvl == 2:
+			# Twin-banded siege dragon cannon accents
+			bar.torus(brad * 1.0, 0, 0.20, 0.22 + blen * 0.12, C["gold"], {"n": 10, "t": 0.15, "l": TX.L_METAL, "rough": 0.32})
+		res["barrel_soup"] = bar
+
+		res["mounts"] = {
+			"flames": flames, "archers": [],
+			"turret_pivot": Vector3(0, dy + 0.14, 0),
+			"fire_pos": Vector3(0, dy + 0.88, 0),
+			"height": dy + 1.15,
+		}
+
+	elif p_kind == "spire":
+		var h := 3.0 + float(lvl) * 0.65
+		# Piece 0: Hexagonal obsidian/stone plinth
+		var p0 := Soup.new()
+		p0.cyl(1.24, 0.62, 0, 0.31, 0, C["basalt"], {"n": 6, "rt": 0.88, "l": TX.L_ROCK})
+		pieces.append(p0)
+
+		# Piece 1: Tapered arcane obelisk shaft with glowing rune inlays
+		var p1 := Soup.new()
+		p1.cyl(0.84, h, 0, 0.62 + h * 0.5, 0, C["stoneD"], {"n": 6, "rt": 0.56, "l": TX.L_MASON, "uvs": 0.45})
+		for i in 3:
+			var a := float(i) * TAU / 3.0
+			p1.box(0.14, h * 0.72, 0.14, cos(a) * 0.62, 0.62 + h * 0.48, sin(a) * 0.62, C["crystal"], {"l": TX.L_PLAIN, "emis": 1.35 + float(lvl) * 0.35, "r": Vector3(0, -a, 0)})
+		pieces.append(p1)
+
+		# Piece 2: Curved iron lightning prongs cradling the levitating crystal
+		var cy := 0.62 + h
+		var p2 := Soup.new()
+		var n_prongs := 3 + lvl
+		for i in n_prongs:
+			var a := float(i) * TAU / float(n_prongs)
+			var b0 := Vector3(cos(a) * 0.46, cy - 0.15, sin(a) * 0.46)
+			var bm := Vector3(cos(a) * 0.94, cy + 0.55, sin(a) * 0.94)
+			var bt := Vector3(cos(a) * 0.68, cy + 1.35, sin(a) * 0.68)
+			p2.seg(b0, bm, 0.10, 0.08, C["ironL"], {"l": TX.L_METAL, "rough": 0.42, "n": 5})
+			p2.seg(bm, bt, 0.08, 0.03, C["steel"], {"l": TX.L_METAL, "rough": 0.35, "n": 5})
+		pieces.append(p2)
+
+		# Levitating crystal core + orbiting shards
+		var crys := Soup.new()
+		var cs := 0.44 + float(lvl) * 0.12
+		crys.oct(cs, cs * 1.75, cs, 0, 0, 0, C["crystal"], {"l": TX.L_PLAIN, "rough": 0.15, "emis": 2.2 + float(lvl) * 0.45})
+		for i in 2 + lvl:
+			var a := float(i) * TAU / float(2 + lvl)
+			crys.oct(cs * 0.28, cs * 0.58, cs * 0.28, cos(a) * 0.72, sin(a) * 0.18, sin(a) * 0.72, C["crystal"], {"l": TX.L_PLAIN, "rough": 0.18, "emis": 1.9})
+		res["crystal_soup"] = crys
+
+		# Counter-rotating carved stone rune ring
+		var ring := Soup.new()
+		ring.torus(0.95 + float(lvl) * 0.14, 0, 0, 0, C["stoneL"], {"n": 12, "t": 0.11, "r": Vector3(PI * 0.5, 0, 0), "l": TX.L_MASON})
+		for i in 4:
+			var a := float(i) * PI * 0.5
+			ring.box(0.14, 0.14, 0.14, cos(a) * (0.95 + float(lvl) * 0.14), 0, sin(a) * (0.95 + float(lvl) * 0.14), C["crystal"], {"emis": 1.7})
+		res["ring_soup"] = ring
+
+		flames.append(Vector3(0.0, cy + 1.05, 0.0))
+		res["mounts"] = {
+			"flames": flames, "archers": [],
+			"crystal_pivot": Vector3(0, cy + 0.92, 0),
+			"fire_pos": Vector3(0, cy + 1.05, 0),
+			"height": cy + 1.65,
+		}
+
+	else: # "guard" barracks & garrison post
+		var p0 := Soup.new()
+		p0.box(2.1, 0.42, 1.95, 0, 0.21, 0, C["stoneD"], {"l": TX.L_MASON, "uvs": 0.45})
+		pieces.append(p0)
+
+		var bh := 1.48 + float(lvl) * 0.34
+		var p1 := Soup.new()
+		p1.box(1.78, bh, 1.56, 0, 0.42 + bh * 0.5, -0.08, C["stone"] if lvl > 0 else C["wood"], {"l": TX.L_MASON if lvl > 0 else TX.L_WOOD, "uvs": 0.5})
+		# Timber framing beams + arched barracks doorway
+		for sx in [-0.90, 0.90]:
+			p1.box(0.16, bh + 0.06, 0.16, sx, 0.42 + bh * 0.5, 0.72, C["woodD"], {"l": TX.L_WOOD})
+		p1.box(0.72, 1.08, 0.18, 0, 0.96, 0.68, C["black"], {"l": TX.L_PLAIN})
+		p1.box(0.92, 0.16, 0.24, 0, 1.54, 0.72, C["stoneL"] if lvl > 0 else C["woodD"], {"l": TX.L_MASON})
+		# Weapon rack / shield mounted on wall
+		p1.cyl(0.24, 0.08, -0.56, 1.24, 0.74, C["clothR"], {"n": 8, "r": Vector3(PI * 0.5, 0, 0), "l": TX.L_METAL, "rough": 0.42})
+		p1.cyl(0.24, 0.08, 0.56, 1.24, 0.74, C["clothR"], {"n": 8, "r": Vector3(PI * 0.5, 0, 0), "l": TX.L_METAL, "rough": 0.42})
+		pieces.append(p1)
+
+		var ry := 0.42 + bh
+		var p2 := Soup.new()
+		var roof_c: Color = C["thatch"] if lvl == 0 else C["slate"]
+		var roof_l: int = TX.L_THATCH if lvl == 0 else TX.L_SLATE
+		p2.box(2.18, 0.14, 1.18, 0, ry + 0.36, -0.44, roof_c, {"l": roof_l, "r": Vector3(0.46, 0, 0), "uvs": 0.8})
+		p2.box(2.18, 0.14, 1.18, 0, ry + 0.36, 0.32, roof_c, {"l": roof_l, "r": Vector3(-0.46, 0, 0), "uvs": 0.8})
+		# Garrison banner mast
+		p2.cyl(0.05, 1.95, 0.78, ry + 1.05, -0.05, C["woodD"], {"n": 6, "l": TX.L_WOOD})
+		p2.cloth_panel({"x0": 0.78, "x1": 1.48, "y_top": ry + 1.95, "len": 0.78, "z": -0.05, "col": C["clothR"], "col2": C["gold"], "rng": rng, "sway": 1.15})
+		# Warm brazier beside entrance
+		p2.cyl(0.18, 0.22, -0.78, 0.72, 0.82, C["iron"], {"n": 6, "rt": 1.2, "l": TX.L_METAL})
+		flames.append(Vector3(-0.78, 0.86, 0.82))
+		if lvl >= 1:
+			p2.cyl(0.18, 0.22, 0.78, 0.72, 0.82, C["iron"], {"n": 6, "rt": 1.2, "l": TX.L_METAL})
+			flames.append(Vector3(0.78, 0.86, 0.82))
+		pieces.append(p2)
+
+		res["mounts"] = {"flames": flames, "archers": [], "fire_pos": Vector3(0, ry + 0.6, 0), "height": ry + 1.4}
+
+	return res

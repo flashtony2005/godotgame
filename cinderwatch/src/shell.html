@@ -21,12 +21,111 @@ canvas{position:fixed;left:0;top:0;width:100%;height:100%;display:block;touch-ac
 #load{position:fixed;left:0;top:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;color:#e8b04a;font:600 20px/1.5 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.08em;pointer-events:none}
 #load small{color:#a79e8a;font-weight:400;font-size:13px;letter-spacing:.02em}
 #safe{position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
+[data-audio-ui]{font-family:ui-monospace,Menlo,Consolas,monospace;box-sizing:border-box;pointer-events:auto;touch-action:manipulation}
+[data-audio-ui] *,[data-audio-ui] *::before,[data-audio-ui] *::after{box-sizing:border-box}
+#audio-menu-btn{position:fixed;left:96px;bottom:10px;z-index:30;display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 12px;background:rgba(9,11,17,.88);border:2px solid #5d4c35;color:#efe4cd;font:600 12px/1 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;white-space:nowrap;box-shadow:inset 0 1px 0 rgba(232,176,74,.14),0 4px 14px rgba(0,0,0,.45);transition:border-color .14s ease,background-color .14s ease,color .14s ease}
+#audio-menu-btn:hover,#audio-menu-btn:focus-visible,#audio-menu-btn[aria-expanded="true"]{background:rgba(24,27,38,.96);border-color:#e8b04a;color:#ffe2a0;outline:none}
+#audio-menu-btn.is-muted{border-color:#7d3a30;color:#e8b3a8}
+#audio-menu-btn.is-muted:hover,#audio-menu-btn.is-muted:focus-visible{border-color:#e5553c;color:#ffd2c8}
+#audio-menu-btn .cw-ico{width:15px;height:15px;flex:0 0 auto;display:block}
+#audio-menu-btn .cw-val{color:#e8b04a;font-variant-numeric:tabular-nums}
+#audio-menu-btn.is-muted .cw-val{color:#e5553c}
+.cw-ico-mute{display:none}
+.is-muted .cw-ico-vol{display:none}
+.is-muted .cw-ico-mute{display:inline}
+#audio-overlay{position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(2,3,8,.62);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+#audio-overlay[hidden]{display:none}
+.cw-dialog{width:min(368px,100%);background:linear-gradient(180deg,rgba(20,23,34,.98) 0%,rgba(9,11,17,.98) 100%);border:2px solid #5d4c35;box-shadow:0 24px 64px rgba(0,0,0,.76),inset 0 1px 0 rgba(232,176,74,.28),0 0 0 1px rgba(2,3,8,.92);color:#efe4cd;overflow:hidden}
+.cw-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(93,76,53,.65);background:rgba(232,176,74,.05)}
+.cw-dialog-title-wrap{display:flex;align-items:center;gap:10px;min-width:0}
+.cw-dialog-title-wrap svg{width:18px;height:18px;color:#e8b04a;flex:0 0 auto}
+.cw-dialog-title{margin:0;font-size:14px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#e8b04a}
+.cw-close{appearance:none;display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;background:rgba(9,11,17,.7);border:1px solid #5d4c35;color:#a79e8a;font:700 15px/1 ui-monospace,Menlo,Consolas,monospace;cursor:pointer;transition:border-color .14s ease,color .14s ease,background-color .14s ease}
+.cw-close:hover,.cw-close:focus-visible{border-color:#e8b04a;color:#ffe2a0;background:rgba(24,27,38,.96);outline:none}
+.cw-dialog-body{padding:18px 16px 16px;display:flex;flex-direction:column;gap:16px}
+.cw-vol-group{display:flex;flex-direction:column;gap:10px}
+.cw-vol-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.cw-vol-label{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#efe4cd}
+.cw-vol-readout{font-size:14px;font-weight:700;letter-spacing:.04em;color:#e8b04a;font-variant-numeric:tabular-nums}
+.cw-dialog.is-muted .cw-vol-readout{color:#a79e8a}
+.cw-slider{--vol-pct:100%;-webkit-appearance:none;appearance:none;width:100%;height:8px;margin:4px 0;background:linear-gradient(to right,#e8b04a 0%,#e8b04a var(--vol-pct),#232735 var(--vol-pct),#232735 100%);border:1px solid #5d4c35;outline:none;cursor:pointer;touch-action:pan-x}
+.cw-dialog.is-muted .cw-slider{background:linear-gradient(to right,#69635a 0%,#69635a var(--vol-pct),#1d202c var(--vol-pct),#1d202c 100%);border-color:#4a4339}
+.cw-slider:focus-visible{border-color:#e8b04a;box-shadow:0 0 0 2px rgba(232,176,74,.28)}
+.cw-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:22px;background:#efe4cd;border:2px solid #e8b04a;box-shadow:0 2px 8px rgba(0,0,0,.6);cursor:pointer;transition:transform .1s ease,background-color .14s ease,border-color .14s ease}
+.cw-slider::-webkit-slider-thumb:hover{background:#ffe9bc;transform:scale(1.06)}
+.cw-dialog.is-muted .cw-slider::-webkit-slider-thumb{background:#9b9488;border-color:#69635a}
+.cw-slider::-moz-range-thumb{width:18px;height:22px;border-radius:0;background:#efe4cd;border:2px solid #e8b04a;box-shadow:0 2px 8px rgba(0,0,0,.6);cursor:pointer}
+.cw-dialog.is-muted .cw-slider::-moz-range-thumb{background:#9b9488;border-color:#69635a}
+.cw-vol-scale{display:flex;justify-content:space-between;font-size:10px;letter-spacing:.06em;color:#7e7769;font-variant-numeric:tabular-nums}
+.cw-mute-btn{appearance:none;display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:11px 14px;background:rgba(24,27,38,.92);border:2px solid #5d4c35;color:#efe4cd;font:600 12px/1.2 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:border-color .14s ease,background-color .14s ease,color .14s ease}
+.cw-mute-btn:hover,.cw-mute-btn:focus-visible{border-color:#e8b04a;background:rgba(34,38,52,.98);color:#ffe2a0;outline:none}
+.cw-mute-btn[aria-pressed="true"]{background:rgba(56,22,19,.86);border-color:#e5553c;color:#ffd5cb}
+.cw-mute-btn[aria-pressed="true"]:hover,.cw-mute-btn[aria-pressed="true"]:focus-visible{background:rgba(76,27,23,.95);border-color:#ff7b61}
+.cw-mute-left{display:inline-flex;align-items:center;gap:10px}
+.cw-mute-left svg{width:16px;height:16px;flex:0 0 auto}
+.cw-kbd{padding:2px 6px;border:1px solid rgba(167,158,138,.45);background:rgba(9,11,17,.65);color:#a79e8a;font-size:11px;letter-spacing:.04em}
+.cw-mute-btn[aria-pressed="true"] .cw-kbd{border-color:rgba(229,85,60,.6);color:#ffb9aa}
+.cw-dialog-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 16px;border-top:1px solid rgba(93,76,53,.45);background:rgba(5,7,11,.55);font-size:11px;color:#8c8475;letter-spacing:.03em}
+.cw-state-note{color:#a79e8a}
 </style>
 </head>
 <body>
 <canvas id="gl"></canvas>
 <canvas id="hud"></canvas>
 <div id="safe"></div>
+<button type="button" id="audio-menu-btn" data-audio-ui aria-haspopup="dialog" aria-expanded="false" aria-controls="audio-overlay" aria-label="Open audio settings">
+  <svg class="cw-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true">
+    <path d="M11 5L6 9H2v6h4l5 4V5z"/>
+    <path class="cw-ico-vol" d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9.5 9.5 0 0 1 0 14"/>
+    <path class="cw-ico-mute" d="M22 9l-6 6M16 9l6 6"/>
+  </svg>
+  <span>Audio</span>
+  <span class="cw-val" id="audio-btn-val">100%</span>
+</button>
+<div id="audio-overlay" data-audio-ui hidden>
+  <div class="cw-dialog" id="audio-dialog" role="dialog" aria-modal="true" aria-labelledby="audio-dialog-title">
+    <div class="cw-dialog-head">
+      <div class="cw-dialog-title-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true">
+          <path d="M11 5L6 9H2v6h4l5 4V5z"/>
+          <path class="cw-ico-vol" d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9.5 9.5 0 0 1 0 14"/>
+          <path class="cw-ico-mute" d="M22 9l-6 6M16 9l6 6"/>
+        </svg>
+        <h2 class="cw-dialog-title" id="audio-dialog-title">Audio Settings</h2>
+      </div>
+      <button type="button" class="cw-close" id="audio-close-btn" aria-label="Close audio settings">✕</button>
+    </div>
+    <div class="cw-dialog-body">
+      <div class="cw-vol-group">
+        <div class="cw-vol-row">
+          <label class="cw-vol-label" for="master-volume-slider">Master Volume</label>
+          <output class="cw-vol-readout" id="master-volume-value" for="master-volume-slider">100%</output>
+        </div>
+        <input class="cw-slider" id="master-volume-slider" type="range" min="0" max="100" step="1" value="100" aria-label="Master Volume" aria-valuetext="100%">
+        <div class="cw-vol-scale" aria-hidden="true">
+          <span>0%</span>
+          <span>50%</span>
+          <span>100%</span>
+        </div>
+      </div>
+      <button type="button" class="cw-mute-btn" id="audio-mute-btn" aria-pressed="false">
+        <span class="cw-mute-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" aria-hidden="true">
+            <path d="M11 5L6 9H2v6h4l5 4V5z"/>
+            <path class="cw-ico-vol" d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9.5 9.5 0 0 1 0 14"/>
+            <path class="cw-ico-mute" d="M22 9l-6 6M16 9l6 6"/>
+          </svg>
+          <span id="audio-mute-label">Mute Audio</span>
+        </span>
+        <span class="cw-kbd">M</span>
+      </button>
+    </div>
+    <div class="cw-dialog-foot">
+      <span class="cw-state-note" id="audio-state-note">Sound active</span>
+      <span>O Menu · Esc Close</span>
+    </div>
+  </div>
+</div>
 <div id="load">Cinderwatch<br><small>Lighting the beacon</small></div>
 <script>/*__THREE__*/</script>
 <script>/*__GAME__*/</script>
