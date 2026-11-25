@@ -8,6 +8,7 @@ extends Node3D
 ## - Smart AI Commander + full manual mouse/keyboard/gamepad control + Camera Director + Procedural Audio + Persistence
 
 const U = preload("res://scripts/util.gd")
+const DevShotScript = preload("res://scripts/devshot.gd")
 const TX = preload("res://scripts/textures.gd")
 const Defs = preload("res://scripts/defs.gd")
 const WorldScript = preload("res://scripts/world.gd")
@@ -209,6 +210,17 @@ func _setup_subsystems() -> void:
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--biome="):
 			biome_idx = world.get_biome_by_key(a.substr(8))
+
+	# 调试截图：--shot=<绝对路径>:<帧数>
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--shot="):
+			var spec := a.substr(7)
+			var parts := spec.split(":")
+			var shot := DevShotScript.new()
+			shot.out_path = parts[0]
+			if parts.size() > 1:
+				shot.frames = int(parts[1])
+			add_child(shot)
 
 	fx = FXScript.new()
 	fx.name = "FX"
@@ -610,12 +622,13 @@ func _pick_biome_mob(w: int) -> String:
 	var early: Dictionary = b.get("early", {})
 	var pool: Array = []
 	var sum_w := 0.0
-	for r in Defs.ROSTER:
-		var k: String = String(r["k"])
-		var min_w: int = int(early.get(k, int(r["w"])))
+	for kind in Defs.ROSTER.keys():
+		var k: String = String(kind)
+		var row: Array = Defs.ROSTER[kind]
+		var min_w: int = int(early.get(k, int(row[4])))
 		if w < min_w:
 			continue
-		var wt: float = float(r["wt"]) * float(mob_w.get(k, 1.0))
+		var wt: float = float(row[5]) * float(mob_w.get(k, 1.0))
 		if wt <= 0.01:
 			continue
 		pool.append([k, wt])
@@ -655,7 +668,7 @@ func _spawn_monster(kind: String, lane: float, dist_along: float = 0.0) -> Dicti
 		"max_hp": max_hp,
 		"spd": float(d["spd"]),
 		"armor": float(d.get("armor", 0.0)),
-		"gold": int(d["gold"]),
+		"gold": int(d.get("bounty", d.get("gold", 0))),
 		"scale": float(d["scale"]),
 		"fly": fly_h,
 		"dmg": float(d.get("dmg", 14.0)),
